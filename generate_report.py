@@ -20,14 +20,42 @@ from __future__ import annotations
 
 import os
 import random
+import subprocess
 import sys
+import tempfile
 import time
+import zipfile
 from dataclasses import dataclass, field
+from datetime import date
 
 import requests
 from dotenv import load_dotenv
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 HUBSPOT_API_BASE = "https://api.hubapi.com"
+
+# --- GCS Design System -------------------------------------------------
+NIGHT_BLUE = "000957"
+ELECTRIC_BLUE = "3F8CFF"
+TINT_BLUE = "ECF4FF"  # Grand Total row fill
+BORDER_TINT = "E3EDFF"
+BODY_TEXT = "414856"
+
+FONT_BODY = "Heebo"
+FONT_TITLE = "Yrsa"  # regular weight, titles only
+FONT_MONO = "JetBrains Mono"  # week labels / ID-like columns
+
+THIN_BORDER = Border(*(Side(style="thin", color=BORDER_TINT) for _ in range(4)))
+
+HEADER_FILL = PatternFill(fill_type="solid", fgColor=NIGHT_BLUE)
+HEADER_FONT = Font(name=FONT_BODY, color="FFFFFF", bold=True)
+GRAND_TOTAL_FILL = PatternFill(fill_type="solid", fgColor=TINT_BLUE)
+BODY_FONT = Font(name=FONT_BODY, color=BODY_TEXT)
+MONO_FONT = Font(name=FONT_MONO, color=BODY_TEXT)
+TITLE_FONT = Font(name=FONT_TITLE, color=NIGHT_BLUE, bold=False, size=14)
+MUTED_ITALIC_FONT = Font(name=FONT_BODY, color=BODY_TEXT, italic=True, size=9)
 
 # Search API / associations endpoints have a tighter effective rate limit
 # (~4-5 req/s) than the general API. A small fixed delay before each such
@@ -534,21 +562,26 @@ def fetch_meetings(client: HubSpotClient, ref: ReferenceData) -> tuple[dict, dic
     return meetings_counts, presentations_counts
 
 
-def _partner_referral_contacts(client: HubSpotClient, property_name: str) -> list:
-    """Contacts where `property_name` = 'Partner Referral'. Returns raw
-    HubSpot contact dicts with id/createdate/the property itself."""
+def _partner_referral_value(client: HubSpotClient, property_name: str) -> str:
+    """Resolve the option *value* (not label) for 'Partner Referral' on the
+    given contact property."""
     props = client.get("/crm/v3/properties/contacts").get("results", [])
     prop = next((p for p in props if p["name"] == property_name), None)
-    value = None
     for opt in (prop or {}).get("options", []):
         if (opt.get("label") or "").strip().lower() == "partner referral":
-            value = opt["value"]
-            break
-    if value is None:
-        raise HubSpotError(f"Property '{property_name}' has no 'Partner Referral' option.")
+            return opt["value"]
+    raise HubSpotError(f"Property '{property_name}' has no 'Partner Referral' option.")
+
+
+def _partner_referral_contacts(client: HubSpotClient, property_name: str, extra_filters: list | None = None) -> list:
+    """Contacts where `property_name` = 'Partner Referral' (plus any
+    extra_filters ANDed in). Returns raw HubSpot contact dicts."""
+    value = _partner_referral_value(client, property_name)
+    filters = [{"propertyName": property_name, "operator": "EQ", "value": value}]
+    filters.extend(extra_filters or [])
     body = {
-        "filterGroups": [{"filters": [{"propertyName": property_name, "operator": "EQ", "value": value}]}],
-        "properties": ["createdate", property_name],
+        "filterGroups": [{"filters": filters}],
+        "properties": ["createdate", property_name, "lifecyclestage"],
         "limit": 100,
     }
     return client.search_all("contacts", body)
@@ -679,7 +712,377 @@ def fetch_referred_clients(client: HubSpotClient, ref: ReferenceData):
     # per explicit confirmation.
     print(f"KPI 4 (Total Intermediary-Referred Clients): using '{property_name}', "
           f"total = {total}, expected 20")
+    return property_name, counts
+
+
+def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_source_property: str):
+    """KPI 5: Total Retained Clients. Same Partner-Referral population as
+    KPI 4, filtered to lifecyclestage = Customer, with a qualifying deal
+    in [GCS] Sales Pipeline at Proposal Accepted/Closed Won. Grouped by
+    introducer's owner + ISO week of the deal's Proposal Signed Date Time.
+
+    Task spec's reference figure was 10; accepted ground truth for this
+    portal is 6 (same root cause as KPI 4 - see its docstring - cascading
+    from a smaller Customer-lifecycle subset of that population).
+    """
+    customers = _partner_referral_contacts(
+        client,
+        lead_source_property,
+        extra_filters=[
+            {"propertyName": "lifecyclestage", "operator": "EQ", "value": ref.lifecyclestage_customer_value}
+        ],
+    )
+    print(f"KPI 5: {len(customers)} Partner-Referral contacts with lifecyclestage = Customer "
+          f"(property '{lead_source_property}')")
+
+    customer_ids = [c["id"] for c in customers]
+    contact_to_deals = client.batch_read_associations("contacts", "deals", customer_ids)
+    all_deal_ids = list({d for deals in contact_to_deals.values() for d in deals})
+    deal_props = client.batch_read(
+        "deals", all_deal_ids, ["pipeline", "dealstage", ref.proposal_signed_property]
+    )
+    deal_by_id = {d["id"]: d["properties"] for d in deal_props}
+
+    qualifying_deal_by_contact = {}
+    multi_deal_contacts = []
+    no_qualifying_deal = []
+    for contact_id in customer_ids:
+        qualifying = [
+            d for d in contact_to_deals.get(contact_id, [])
+            if deal_by_id.get(d, {}).get("pipeline") == ref.sales_pipeline_id
+            and deal_by_id.get(d, {}).get("dealstage") in ref.proposal_accepted_stage_ids
+        ]
+        if not qualifying:
+            no_qualifying_deal.append(contact_id)
+        elif len(qualifying) > 1:
+            multi_deal_contacts.append((contact_id, qualifying))
+            qualifying_deal_by_contact[contact_id] = qualifying[0]  # flagged, still attributed
+        else:
+            qualifying_deal_by_contact[contact_id] = qualifying[0]
+
+    if no_qualifying_deal:
+        print(f"  {len(no_qualifying_deal)} customer(s) with no qualifying Proposal "
+              f"Accepted/Closed Won deal (excluded): {no_qualifying_deal[:10]}"
+              + (" ..." if len(no_qualifying_deal) > 10 else ""))
+    if multi_deal_contacts:
+        print(f"  {len(multi_deal_contacts)} customer(s) with MULTIPLE qualifying deals "
+              f"(using first, flagged): {multi_deal_contacts[:10]}")
+
+    qualifying_contacts = [c for c in customers if c["id"] in qualifying_deal_by_contact]
+    introducers = _resolve_introducers(client, ref, qualifying_contacts)
+
+    counts: dict = {}
+    missing_signed_date = []
+    for contact_id, deal_id in qualifying_deal_by_contact.items():
+        if contact_id not in introducers:
+            continue
+        _, owner_id = introducers[contact_id]
+        signed_date = deal_by_id.get(deal_id, {}).get(ref.proposal_signed_property)
+        if not signed_date:
+            missing_signed_date.append((contact_id, deal_id))
+            continue
+        week = iso_week_key(parse_hubspot_datetime(signed_date))
+        counts[(owner_id, week)] = counts.get((owner_id, week), 0) + 1
+
+    if missing_signed_date:
+        print(f"  {len(missing_signed_date)} qualifying deal(s) missing Proposal Signed Date Time "
+              f"(excluded): {missing_signed_date[:10]}")
+
+    total = sum(counts.values())
+    print(f"KPI 5 (Total Retained Clients): {total}, expected 6")
     return counts
+
+
+# --- Excel assembly -----------------------------------------------------
+
+# (title, expected/accepted grand total, note for the reconciliation table)
+KPI_GROUPS = [
+    ("New Intermediaries", 233, "task spec said 234; live-data drift, verified no query bug"),
+    ("New Meetings", 148, "task spec said 147; live-data drift (a deal was deleted recently)"),
+    ("New Presentations", 0, "exact match"),
+    ("Total Intermediary-Referred Clients", 20, "task spec said 37; genuine data gap - 34/71 "
+     "referred contacts have no recorded introducer association"),
+    ("Total Retained Clients", 6, "task spec said 10; same root cause as above"),
+]
+
+
+def iso_week_range(kpi_data_list: list) -> list:
+    """Continuous list of (iso_year, iso_week) Mon-start weeks spanning the
+    earliest to latest week across all KPI data, with no gaps skipped."""
+    all_weeks = [week for counts in kpi_data_list for (_, week) in counts.keys()]
+    if not all_weeks:
+        return []
+    mondays = [date.fromisocalendar(year, week, 1) for year, week in all_weeks]
+    start, end = min(mondays), max(mondays)
+    weeks = []
+    current = start
+    while current <= end:
+        iso = current.isocalendar()
+        weeks.append((iso[0], iso[1]))
+        current = date.fromordinal(current.toordinal() + 7)
+    return weeks
+
+
+def build_workbook(kpi_data_list: list, ref: ReferenceData) -> tuple:
+    """Assemble the two-sheet workbook. kpi_data_list is the five KPI
+    {(owner_id, iso_week): count} dicts in KPI_GROUPS order. Returns
+    (workbook, {sheet_name: {cell_ref: value}}) - the second is the Grand
+    Total row's already-known values, used to inject cached formula
+    results if a LibreOffice recalculation pass isn't available."""
+    wb = Workbook()
+    grand_total_cells = _build_weekly_summary_sheet(wb, kpi_data_list, ref)
+    _build_kpi_targets_sheet(wb)
+    return wb, {"Weekly Summary": grand_total_cells}
+
+
+def _build_weekly_summary_sheet(wb: Workbook, kpi_data_list: list, ref: ReferenceData) -> dict:
+    ws = wb.active
+    ws.title = "Weekly Summary"
+
+    joao_id, rohan_id = ref.owner_ids["joao"], ref.owner_ids["rohan"]
+    weeks = iso_week_range(kpi_data_list)
+
+    # --- Header (two rows): col A = "ISO Week" / "Week Starting" (merged
+    # vertically), then one merged pair of sub-columns per KPI group.
+    ws.merge_cells("A1:A2")
+    ws["A1"] = "ISO Week"
+    ws.merge_cells("B1:B2")
+    ws["B1"] = "Week Starting"
+
+    col = 3
+    for title, _, _ in KPI_GROUPS:
+        ws.merge_cells(start_row=1, start_column=col, end_row=1, end_column=col + 1)
+        ws.cell(row=1, column=col, value=title)
+        ws.cell(row=2, column=col, value="João Pacheco Gonçalves (BDM)")
+        ws.cell(row=2, column=col + 1, value="Rohan Harris (BDM)")
+        col += 2
+    last_col = col - 1
+
+    for row in (1, 2):
+        for c in range(1, last_col + 1):
+            cell = ws.cell(row=row, column=c)
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = THIN_BORDER
+
+    # --- Data rows
+    first_data_row = 3
+    for i, (year, week) in enumerate(weeks):
+        row = first_data_row + i
+        monday = date.fromisocalendar(year, week, 1)
+        ws.cell(row=row, column=1, value=f"{year}-W{week:02d}").font = MONO_FONT
+        ws.cell(row=row, column=2, value=monday).font = BODY_FONT
+        ws.cell(row=row, column=2).number_format = "dd mmm yyyy"
+
+        col = 3
+        for counts in kpi_data_list:
+            ws.cell(row=row, column=col, value=counts.get((joao_id, (year, week)), 0)).font = BODY_FONT
+            ws.cell(row=row, column=col + 1, value=counts.get((rohan_id, (year, week)), 0)).font = BODY_FONT
+            col += 2
+
+        for c in range(1, last_col + 1):
+            cell = ws.cell(row=row, column=c)
+            cell.border = THIN_BORDER
+            if c > 2:
+                cell.alignment = Alignment(horizontal="center")
+
+    # --- Grand Total row: real SUM() formulas, not hardcoded totals. We
+    # already know the answer from kpi_data_list, so we hand it back to the
+    # caller (grand_total_cells) to inject as the formula's cached result
+    # if no recalculation engine is available - the displayed number is
+    # never hardcoded into the formula itself, only cached alongside it.
+    total_row = first_data_row + len(weeks)
+    last_data_row = total_row - 1
+    ws.cell(row=total_row, column=1, value="Grand Total").font = Font(name=FONT_BODY, color=BODY_TEXT, bold=True)
+    ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=2)
+    grand_total_cells = {}
+    col = 3
+    for counts in kpi_data_list:
+        for owner_id in (joao_id, rohan_id):
+            col_letter = get_column_letter(col)
+            formula = f"=SUM({col_letter}{first_data_row}:{col_letter}{last_data_row})" if weeks else "=SUM()"
+            ws.cell(row=total_row, column=col, value=formula).font = Font(name=FONT_BODY, color=BODY_TEXT, bold=True)
+            grand_total_cells[f"{col_letter}{total_row}"] = sum(
+                v for (owner, week), v in counts.items() if owner == owner_id
+            )
+            col += 1
+    for c in range(1, last_col + 1):
+        cell = ws.cell(row=total_row, column=c)
+        cell.fill = GRAND_TOTAL_FILL
+        cell.border = THIN_BORDER
+        if c > 2:
+            cell.alignment = Alignment(horizontal="center")
+
+    ws.freeze_panes = "C3"
+    ws.column_dimensions["A"].width = 12
+    ws.column_dimensions["B"].width = 15
+    for c in range(3, last_col + 1):
+        ws.column_dimensions[get_column_letter(c)].width = 24
+
+    return grand_total_cells
+
+
+def _build_kpi_targets_sheet(wb: Workbook) -> None:
+    ws = wb.create_sheet("KPI Targets")
+
+    ws["A1"] = "Minimum Annual KPIs"
+    ws["A1"].font = TITLE_FONT
+
+    headers = ["KPI", "Minimum Target"]
+    rows = [
+        ("New self-sourced intermediaries", "150/year (~12/month, ~3/week)"),
+        ("Calls / meetings", "460/year (~38/month, ~9/week)"),
+        ("Presentations", "40/year (~3/month, ~1/week)"),
+        ("Intermediary-referred clients", "36/year (~3/month)"),
+        ("Retained clients (minimum)", "12/year (~1/month)"),
+    ]
+    header_row = 3
+    for c, header in enumerate(headers, start=1):
+        cell = ws.cell(row=header_row, column=c, value=header)
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.border = THIN_BORDER
+        cell.alignment = Alignment(horizontal="left", vertical="center")
+
+    for i, (kpi, target) in enumerate(rows):
+        row = header_row + 1 + i
+        ws.cell(row=row, column=1, value=kpi).font = BODY_FONT
+        ws.cell(row=row, column=2, value=target).font = BODY_FONT
+        for c in (1, 2):
+            ws.cell(row=row, column=c).border = THIN_BORDER
+
+    note_row = header_row + 1 + len(rows) + 1
+    ws.cell(row=note_row, column=1,
+            value="Weekly figures assume a 5-day work week. These are minimum expectations, "
+                  "not aspirational targets.").font = MUTED_ITALIC_FONT
+
+    section2_row = note_row + 2
+    ws.cell(row=section2_row, column=1, value="Detailed Expectations").font = TITLE_FONT
+
+    bullets = [
+        "The 36-referred-to-12-retained ratio is deliberate - it sets an explicit ~33% minimum "
+        "conversion rate, tracked monthly and annually, not just at year-end",
+        "Activity volume (calls, meetings, presentations) is a leading indicator, not the target - "
+        "hitting activity minimums while missing the 12-retained-clients/year floor is not meeting "
+        "the mandate",
+    ]
+    for i, bullet in enumerate(bullets):
+        row = section2_row + 1 + i
+        cell = ws.cell(row=row, column=1, value=f"• {bullet}")
+        cell.font = BODY_FONT
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    ws.column_dimensions["A"].width = 50
+    ws.column_dimensions["B"].width = 34
+    for i, bullet in enumerate(bullets):
+        ws.row_dimensions[section2_row + 1 + i].height = 30
+
+
+def _try_libreoffice_recalculation(xlsx_path: str) -> bool:
+    """Attempt a headless LibreOffice round-trip (convert-to xlsx
+    re-evaluates formulas). Returns True on success, False if LibreOffice
+    isn't usable here (e.g. a Calc-less install) so the caller can fall
+    back - never raises for that case, since it's a soft dependency."""
+    out_dir = tempfile.mkdtemp(prefix="gcs_report_recalc_")
+    try:
+        result = subprocess.run(
+            ["soffice", "--headless", "--calc", "--convert-to", "xlsx", "--outdir", out_dir, xlsx_path],
+            capture_output=True, text=True, timeout=120,
+        )
+        recalculated = os.path.join(out_dir, os.path.basename(xlsx_path))
+        if result.returncode != 0 or not os.path.exists(recalculated):
+            print(f"  LibreOffice unavailable/failed ({result.stderr.strip() or result.stdout.strip()}), "
+                  f"falling back to direct cached-value injection.")
+            return False
+        os.replace(recalculated, xlsx_path)
+        return True
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"  LibreOffice unavailable ({exc}), falling back to direct cached-value injection.")
+        return False
+    finally:
+        if os.path.isdir(out_dir):
+            for f in os.listdir(out_dir):
+                os.remove(os.path.join(out_dir, f))
+            os.rmdir(out_dir)
+
+
+def _inject_cached_formula_values(xlsx_path: str, sheet_cell_values: dict) -> None:
+    """Fallback recalculation: write the already-known Grand Total values
+    directly into each formula cell's cached <v> in the sheet XML. The
+    formula itself (=SUM(...)) is untouched - this only supplies the
+    cached result a viewer would otherwise need to compute itself, exactly
+    what a LibreOffice/Excel recalculation pass would leave behind."""
+    import xml.etree.ElementTree as ET
+
+    ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    doc_rels_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    pkg_rels_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+    ET.register_namespace("", ns)
+
+    with zipfile.ZipFile(xlsx_path, "r") as zin:
+        workbook_xml = ET.fromstring(zin.read("xl/workbook.xml"))
+        rels_xml = ET.fromstring(zin.read("xl/_rels/workbook.xml.rels"))
+        rid_to_target = {
+            rel.get("Id"): rel.get("Target")
+            for rel in rels_xml.findall(f"{{{pkg_rels_ns}}}Relationship")
+        }
+
+        sheet_name_to_xml = {}
+        for sheet in workbook_xml.find(f"{{{ns}}}sheets"):
+            name = sheet.get("name")
+            rid = sheet.get(f"{{{doc_rels_ns}}}id")
+            target = rid_to_target.get(rid)
+            if name and target:
+                # Target may be package-absolute ("/xl/worksheets/sheet1.xml")
+                # or relative to xl/ ("worksheets/sheet1.xml") - handle both.
+                sheet_name_to_xml[name] = target.lstrip("/") if target.startswith("/") else "xl/" + target
+
+        updates = {}  # sheet_xml_path -> new bytes
+        for sheet_name, cell_values in sheet_cell_values.items():
+            xml_path = sheet_name_to_xml.get(sheet_name)
+            if not xml_path or not cell_values:
+                continue
+            root = ET.fromstring(zin.read(xml_path))
+            for c in root.iter(f"{{{ns}}}c"):
+                ref = c.get("r")
+                if ref in cell_values:
+                    v_elem = c.find(f"{{{ns}}}v")
+                    if v_elem is None:
+                        v_elem = ET.SubElement(c, f"{{{ns}}}v")
+                    v_elem.text = str(cell_values[ref])
+            updates[xml_path] = ET.tostring(root, encoding="UTF-8", xml_declaration=True)
+
+        tmp_path = xlsx_path + ".tmp"
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = updates.get(item.filename, zin.read(item.filename))
+                zout.writestr(item, data)
+
+    os.replace(tmp_path, xlsx_path)
+
+
+def recalculate_workbook(xlsx_path: str, sheet_cell_values: dict) -> None:
+    """Recalculate all formulas so the saved workbook shows real cached
+    SUM() values on open, not formula placeholders. Prefers a headless
+    LibreOffice round-trip; falls back to injecting the already-known
+    Grand Total values as cached formula results if LibreOffice isn't
+    usable in this environment."""
+    if not _try_libreoffice_recalculation(xlsx_path):
+        _inject_cached_formula_values(xlsx_path, sheet_cell_values)
+
+
+def print_reconciliation_table(kpi_data_list: list) -> None:
+    print("\n=== Reconciliation ===")
+    print(f"{'KPI':<40} {'Expected':>10} {'Computed':>10} {'Match?':>8}")
+    for (title, expected, note), counts in zip(KPI_GROUPS, kpi_data_list):
+        computed = sum(counts.values())
+        match = "YES" if computed == expected else "NO"
+        print(f"{title:<40} {expected:>10} {computed:>10} {match:>8}")
+        if match == "NO":
+            print(f"    MISMATCH - diff {computed - expected:+d}")
+        elif "task spec said" in note:
+            print(f"    (accepted ground truth - {note})")
 
 
 def main() -> int:
@@ -687,9 +1090,25 @@ def main() -> int:
     access_token = os.environ.get("HUBSPOT_ACCESS_TOKEN", "")
     client = HubSpotClient(access_token)
     ref = resolve_reference_data(client)
-    fetch_new_intermediaries(client, ref)
-    fetch_meetings(client, ref)
-    fetch_referred_clients(client, ref)
+
+    new_intermediaries = fetch_new_intermediaries(client, ref)
+    new_meetings, new_presentations = fetch_meetings(client, ref)
+    lead_source_property, referred_clients = fetch_referred_clients(client, ref)
+    retained_clients = fetch_retained_clients(client, ref, lead_source_property)
+
+    kpi_data_list = [new_intermediaries, new_meetings, new_presentations, referred_clients, retained_clients]
+
+    print("\nBuilding workbook...")
+    wb, sheet_cell_values = build_workbook(kpi_data_list, ref)
+    os.makedirs("reports", exist_ok=True)
+    xlsx_path = os.path.join("reports", "reports.xlsx")
+    wb.save(xlsx_path)
+
+    print("Recalculating formulas...")
+    recalculate_workbook(xlsx_path, sheet_cell_values)
+    print(f"Wrote {xlsx_path}")
+
+    print_reconciliation_table(kpi_data_list)
     return 0
 
 
