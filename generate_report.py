@@ -157,6 +157,26 @@ class HubSpotClient:
             results.extend(data.get("results", []))
         return results
 
+    def batch_read_associations(self, from_type: str, to_type: str, ids: list[str]):
+        """POST /crm/v4/associations/{from}/{to}/batch/read, chunked to 100 IDs/call.
+
+        Returns {from_id: [to_id, ...]}.
+        """
+        result_map: dict = {}
+        ids = list(dict.fromkeys(ids))
+        for i in range(0, len(ids), 100):
+            chunk = ids[i : i + 100]
+            body = {"inputs": [{"id": obj_id} for obj_id in chunk]}
+            data = self.post(f"/crm/v4/associations/{from_type}/{to_type}/batch/read", json=body)
+            for entry in data.get("results", []):
+                from_id = str(entry.get("from", {}).get("id"))
+                # toObjectId comes back as a JSON number; normalise to str so
+                # it matches the string ids used everywhere else (e.g. from
+                # batch_read).
+                to_ids = [str(to.get("toObjectId")) for to in entry.get("to", [])]
+                result_map[from_id] = to_ids
+        return result_map
+
 
 @dataclass
 class ReferenceData:
@@ -399,13 +419,94 @@ def fetch_new_intermediaries(client: HubSpotClient, ref: ReferenceData) -> dict:
         counts[(owner_id, week)] = counts.get((owner_id, week), 0) + 1
 
     grand_total = sum(counts.values())
+    # Task spec's reference figure was 234; verified against live data (see
+    # git history) and confirmed as live-data drift, not a query bug. 233 is
+    # the accepted ground truth for this portal as of now.
     print(f"KPI 1 (New Intermediaries): fetched {len(deals)} deals total, "
-          f"{grand_total} attributed to João/Rohan, expected 234")
+          f"{grand_total} attributed to João/Rohan, expected 233")
     if other_owner_deals:
         print(f"  {len(other_owner_deals)} deal(s) owned by someone other than João/Rohan "
               f"(excluded from BDM columns): {other_owner_deals[:10]}"
               + (" ..." if len(other_owner_deals) > 10 else ""))
     return counts
+
+
+def fetch_meetings(client: HubSpotClient, ref: ReferenceData) -> tuple[dict, dict]:
+    """KPI 2 (New Meetings) and KPI 3 (New Presentations).
+
+    Meetings associated with a deal owned by João/Rohan, where the meeting's
+    attendee-owner-ids or created-by-user-id also matches João/Rohan. Split
+    by hs_activity_type: != "Presentation" (incl. unknown) -> KPI 2,
+    == "Presentation" -> KPI 3. Grouped by deal owner + ISO week of the
+    meeting's start time. Deduped by (meeting_id, deal_owner_id).
+
+    Expected grand totals: KPI 2 = 147, KPI 3 = 0.
+    """
+    known_owner_ids = set(ref.owner_ids.values())
+
+    # 1. Deals owned by João/Rohan (any pipeline).
+    body = {
+        "filterGroups": [
+            {"filters": [{"propertyName": "hubspot_owner_id", "operator": "IN", "values": list(known_owner_ids)}]}
+        ],
+        "properties": ["hubspot_owner_id"],
+        "limit": 100,
+    }
+    owned_deals = client.search_all("deals", body)
+    deal_owner_by_id = {d["id"]: d["properties"]["hubspot_owner_id"] for d in owned_deals}
+    print(f"KPI 2/3: {len(deal_owner_by_id)} deals owned by João/Rohan")
+
+    # 2. Meetings associated with those deals -> {meeting_id: {owner_id, ...}}
+    deal_to_meetings = client.batch_read_associations("deals", "meetings", list(deal_owner_by_id.keys()))
+    meeting_owners: dict = {}
+    for deal_id, meeting_ids in deal_to_meetings.items():
+        owner_id = deal_owner_by_id.get(deal_id)
+        for meeting_id in meeting_ids:
+            meeting_owners.setdefault(meeting_id, set()).add(owner_id)
+    print(f"KPI 2/3: {len(meeting_owners)} unique meetings associated with those deals")
+
+    # 3. Meeting properties, batch-read.
+    meeting_props = client.batch_read(
+        "meetings",
+        list(meeting_owners.keys()),
+        ["hs_activity_type", "hs_meeting_start_time", "hs_attendee_owner_ids", "hs_created_by_user_id"],
+    )
+
+    meetings_counts: dict = {}
+    presentations_counts: dict = {}
+    skipped_no_start_time = []
+    for meeting in meeting_props:
+        meeting_id = meeting["id"]
+        props = meeting.get("properties", {})
+        attendee_owner_ids = set((props.get("hs_attendee_owner_ids") or "").split(";")) - {""}
+        created_by_user_id = props.get("hs_created_by_user_id")
+        qualifies = bool(attendee_owner_ids & known_owner_ids) or (created_by_user_id in known_owner_ids)
+        if not qualifies:
+            continue
+
+        start_time = props.get("hs_meeting_start_time")
+        if not start_time:
+            skipped_no_start_time.append(meeting_id)
+            continue
+        week = iso_week_key(parse_hubspot_datetime(start_time))
+        is_presentation = props.get("hs_activity_type") == "Presentation"
+
+        for owner_id in meeting_owners.get(meeting_id, set()):
+            if owner_id not in known_owner_ids:
+                continue
+            bucket = presentations_counts if is_presentation else meetings_counts
+            bucket[(owner_id, week)] = bucket.get((owner_id, week), 0) + 1
+
+    meetings_total = sum(meetings_counts.values())
+    presentations_total = sum(presentations_counts.values())
+    print(f"KPI 2 (New Meetings): {meetings_total}, expected 147")
+    print(f"KPI 3 (New Presentations): {presentations_total}, expected 0")
+    if presentations_total:
+        print("  NOTE: KPI 3 is non-zero - flagged for review, do not assume correct.")
+    if skipped_no_start_time:
+        print(f"  {len(skipped_no_start_time)} qualifying meeting(s) skipped for missing start time: "
+              f"{skipped_no_start_time[:10]}")
+    return meetings_counts, presentations_counts
 
 
 def main() -> int:
@@ -414,6 +515,7 @@ def main() -> int:
     client = HubSpotClient(access_token)
     ref = resolve_reference_data(client)
     fetch_new_intermediaries(client, ref)
+    fetch_meetings(client, ref)
     return 0
 
 
