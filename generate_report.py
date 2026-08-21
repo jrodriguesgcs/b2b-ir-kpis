@@ -344,11 +344,76 @@ def _count_contacts_with_value(client: HubSpotClient, property_name: str, label:
     return data.get("total", 0)
 
 
+def iso_week_key(dt) -> tuple[int, int]:
+    """Return (iso_year, iso_week) for a datetime, Mon-start ISO week."""
+    iso = dt.isocalendar()
+    return (iso[0], iso[1])
+
+
+def parse_hubspot_datetime(value: str):
+    """Parse a HubSpot ISO-8601 timestamp (e.g. createdate) into a datetime."""
+    from datetime import datetime
+
+    # HubSpot returns e.g. "2026-03-04T10:15:30.000Z"
+    return datetime.strptime(value.split(".")[0].rstrip("Z"), "%Y-%m-%dT%H:%M:%S")
+
+
+def fetch_new_intermediaries(client: HubSpotClient, ref: ReferenceData) -> dict:
+    """KPI 1: deals in the [GCS] Institutional Relations pipeline, created
+    this year so far, with a known owner. Grouped by owner + ISO week of
+    createdate. Expected grand total: 234.
+    """
+    from datetime import datetime, timezone
+
+    year_start = datetime(datetime.now(timezone.utc).year, 1, 1, tzinfo=timezone.utc)
+    year_start_ms = int(year_start.timestamp() * 1000)
+
+    body = {
+        "filterGroups": [
+            {
+                "filters": [
+                    {"propertyName": "pipeline", "operator": "EQ", "value": ref.intermediary_pipeline_id},
+                    {"propertyName": "createdate", "operator": "GTE", "value": year_start_ms},
+                    {"propertyName": "hubspot_owner_id", "operator": "HAS_PROPERTY"},
+                ]
+            }
+        ],
+        "properties": ["hubspot_owner_id", "createdate"],
+        "limit": 100,
+    }
+    deals = client.search_all("deals", body)
+
+    counts: dict = {}
+    other_owner_deals = []
+    known_owner_ids = set(ref.owner_ids.values())
+    for deal in deals:
+        props = deal.get("properties", {})
+        owner_id = props.get("hubspot_owner_id")
+        created = props.get("createdate")
+        if not owner_id or not created:
+            continue
+        if owner_id not in known_owner_ids:
+            other_owner_deals.append((deal["id"], owner_id))
+            continue
+        week = iso_week_key(parse_hubspot_datetime(created))
+        counts[(owner_id, week)] = counts.get((owner_id, week), 0) + 1
+
+    grand_total = sum(counts.values())
+    print(f"KPI 1 (New Intermediaries): fetched {len(deals)} deals total, "
+          f"{grand_total} attributed to João/Rohan, expected 234")
+    if other_owner_deals:
+        print(f"  {len(other_owner_deals)} deal(s) owned by someone other than João/Rohan "
+              f"(excluded from BDM columns): {other_owner_deals[:10]}"
+              + (" ..." if len(other_owner_deals) > 10 else ""))
+    return counts
+
+
 def main() -> int:
     load_dotenv()
     access_token = os.environ.get("HUBSPOT_ACCESS_TOKEN", "")
     client = HubSpotClient(access_token)
-    resolve_reference_data(client)
+    ref = resolve_reference_data(client)
+    fetch_new_intermediaries(client, ref)
     return 0
 
 
