@@ -165,6 +165,7 @@ class ReferenceData:
     typeid_introducer: int
     typeid_referred_person: int
     lead_source_property: str
+    lead_source_candidates: list[str]  # all candidates with a "Partner Referral" option
     proposal_signed_property: str
     intermediary_pipeline_id: str
     sales_pipeline_id: str
@@ -197,8 +198,12 @@ def resolve_reference_data(client: HubSpotClient) -> ReferenceData:
     print(f"  TYPEID_REFERRED_PERSON (inverse)                 = {typeid_referred_person}")
 
     # --- Contact lead-source property holding "Partner Referral"
-    lead_source_property = _resolve_lead_source_property(client)
-    print(f"  Lead-source property (Partner Referral) = {lead_source_property}")
+    # Multiple overlapping legacy properties can carry this option; KPI 4
+    # reconciles all candidates against its expected total (37) rather than
+    # committing to a guess here (see fetch_referred_clients).
+    lead_source_property, lead_source_candidates = _resolve_lead_source_property(client)
+    print(f"  Lead-source property (best guess, reconciled in KPI 4) = {lead_source_property}")
+    print(f"  Lead-source candidates carrying 'Partner Referral'     = {lead_source_candidates}")
 
     # --- Deal property: "Proposal Signed Date Time"
     deal_props = client.get("/crm/v3/properties/deals")
@@ -225,7 +230,7 @@ def resolve_reference_data(client: HubSpotClient) -> ReferenceData:
         label = (pipeline.get("label") or "").strip()
         if label == "[GCS] Institutional Relations":
             intermediary_pipeline_id = pipeline["id"]
-        if label.lower() == "sales pipeline":
+        if "sales pipeline" in label.lower():
             sales_pipeline_id = pipeline["id"]
             for stage in pipeline.get("stages", []):
                 stage_label = (stage.get("label") or "").strip().lower()
@@ -236,7 +241,7 @@ def resolve_reference_data(client: HubSpotClient) -> ReferenceData:
     if not sales_pipeline_id or not proposal_accepted_stage_ids:
         raise HubSpotError("Could not resolve 'Sales Pipeline' / Proposal Accepted/Closed Won stage.")
     print(f"  Pipeline '[GCS] Institutional Relations' id = {intermediary_pipeline_id}")
-    print(f"  Pipeline 'Sales Pipeline' id                = {sales_pipeline_id}")
+    print(f"  Pipeline '[GCS] Sales Pipeline' id           = {sales_pipeline_id}")
     print(f"  Stage id(s) Proposal Accepted/Closed Won    = {proposal_accepted_stage_ids}")
 
     # --- lifecyclestage "Customer" value
@@ -271,6 +276,7 @@ def resolve_reference_data(client: HubSpotClient) -> ReferenceData:
         typeid_introducer=typeid_introducer,
         typeid_referred_person=typeid_referred_person,
         lead_source_property=lead_source_property,
+        lead_source_candidates=lead_source_candidates,
         proposal_signed_property=proposal_signed_property,
         intermediary_pipeline_id=intermediary_pipeline_id,
         sales_pipeline_id=sales_pipeline_id,
@@ -283,10 +289,12 @@ def resolve_reference_data(client: HubSpotClient) -> ReferenceData:
 _LEAD_SOURCE_CANDIDATES = ["lead_source", "manual_lead_source", "gc_manual_lead_source"]
 
 
-def _resolve_lead_source_property(client: HubSpotClient) -> str:
+def _resolve_lead_source_property(client: HubSpotClient) -> tuple[str, list[str]]:
     """Check each candidate lead-source property for a 'Partner Referral' option
     and report counts so the caller can reconcile against the expected KPI 4/5
-    totals rather than assuming a fixed property name.
+    totals rather than assuming a fixed property name. Returns (best_guess,
+    all_candidates) - KPI 4 tries every candidate and locks in whichever one
+    reconciles to the expected total.
     """
     props_by_name = {p["name"]: p for p in client.get("/crm/v3/properties/contacts").get("results", [])}
     candidates_found = {}
@@ -313,7 +321,7 @@ def _resolve_lead_source_property(client: HubSpotClient) -> str:
     # candidate priority order. This is reconciled against KPI 4/5 expected
     # totals during isolated verification (see README / task notes).
     best_name = max(candidates_found, key=lambda n: (candidates_found[n], -_LEAD_SOURCE_CANDIDATES.index(n)))
-    return best_name
+    return best_name, list(candidates_found.keys())
 
 
 def _count_contacts_with_value(client: HubSpotClient, property_name: str, label: str, prop: dict) -> int:
