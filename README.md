@@ -5,9 +5,10 @@ two-sheet Excel workbook (`reports/reports.xlsx`) tracking five weekly KPIs
 for the Institutional Relations BDMs (João Pacheco Gonçalves and Rohan
 Harris), plus a static reference sheet of annual KPI targets.
 
-This repository is deliberately scoped to the data-fetching + Excel
-generation script only. GitHub Actions scheduling and email delivery are a
-separate, later step - see [Not in scope](#not-in-scope-yet) below.
+Runs automatically every week via GitHub Actions, committing the
+regenerated report back to the repo and emailing it as an attachment -
+see [Automation](#automation-github-actions) below. It also runs fine
+standalone from a local checkout for testing or one-off use.
 
 ## Setup
 
@@ -137,16 +138,49 @@ The generated Excel output is the one place this is renamed: every
 user-facing label there says **"BDM"** instead - a display-only
 substitution.
 
-## Not in scope yet
+## Automation (GitHub Actions)
 
-The following are deliberately deferred to a later step - the code is
-structured so they're easy to add without touching the KPI logic:
+`.github/workflows/weekly-report.yml` runs the whole pipeline on a
+schedule and emails the result:
 
-- A GitHub Actions workflow: a weekly `on.schedule` cron (offset from the
-  top of the hour) plus `workflow_dispatch` for manual runs, committing
-  the generated `reports/reports.xlsx` back to the repo.
-- An SMTP-based email step (e.g. `dawidd6/action-send-mail`) attaching
-  `reports.xlsx`, plus an explicit failure-notification step.
-- At that point, `HUBSPOT_ACCESS_TOKEN` moves from the local `.env` to a
-  GitHub Actions encrypted secret - no code changes required, since the
-  script already reads it from an environment variable.
+- **Schedule**: every Monday, `0 7 * * 1` (07:00 UTC) - plus
+  `workflow_dispatch` for an on-demand manual run from the Actions tab.
+  GitHub Actions cron is UTC-only and doesn't shift for DST, so 07:00 UTC
+  approximates 08:00 Europe/Lisbon during WEST/DST (roughly late
+  Mar-late Oct) and lands at 07:00 Lisbon the rest of the year. Adjust the
+  cron expression in the workflow file if a different time or day is
+  needed.
+- **What it does**: installs dependencies, runs `generate_report.py`,
+  commits the regenerated `reports/reports.xlsx` back to the repository
+  (skipped if nothing changed that week), then emails it as an attachment
+  via SMTP (`dawidd6/action-send-mail`). A separate `if: failure()` step
+  sends a failure notification instead if any earlier step breaks, so a
+  broken run is never silent.
+- **No LibreOffice install step**: GitHub-hosted `ubuntu-latest` runners
+  don't ship LibreOffice Calc by default, and installing it would add
+  real minutes to every run. `generate_report.py`'s cached-value fallback
+  (see above) handles this automatically - the workflow doesn't need to
+  do anything special.
+
+### Required repository secrets
+
+Add these under Settings → Secrets and variables → Actions:
+
+| Secret | Purpose |
+|---|---|
+| `HUBSPOT_ACCESS_TOKEN` | The same Service Key / private app token used locally |
+| `SMTP_SERVER` | SMTP host (e.g. `smtp.office365.com`, `smtp.gmail.com`) |
+| `SMTP_PORT` | SMTP port (e.g. `587`) |
+| `SMTP_USERNAME` | SMTP login |
+| `SMTP_PASSWORD` | SMTP password / app password |
+| `MAIL_FROM` | The "from" address the report is sent from |
+
+The recipient is **not** a secret - it's the `REPORT_RECIPIENT` value near
+the top of `.github/workflows/weekly-report.yml`. Edit it directly (it's
+currently `jrodrigues@globalcitizensolutions.com`) whenever the recipient
+should change.
+
+### Triggering a manual run
+
+Actions tab → "Weekly B2B IR KPI Report" → Run workflow. Useful for
+testing the secrets/schedule without waiting for Monday.
