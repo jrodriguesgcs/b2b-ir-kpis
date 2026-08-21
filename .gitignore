@@ -1,0 +1,12 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Generated report (regenerated on every run, not checked in)
+reports/*.xlsx
+!reports/.gitkeep
