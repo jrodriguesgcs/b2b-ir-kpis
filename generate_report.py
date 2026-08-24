@@ -5,9 +5,12 @@ B2B Intermediary-Referral KPI report generator.
 Fetches deal, meeting and contact data from HubSpot and writes a styled
 two-sheet Excel workbook to reports/reports.xlsx:
 
-  - "Weekly Summary": five KPIs, grouped by ISO week and by deal owner
-    (the internal HubSpot property `hubspot_owner_id`; rendered in the
-    workbook as "BDM").
+  - "Year to Date": five stages as top-level columns (Retained Clients,
+    Referred Clients, New Intermediaries, Presentations, Calls/Meetings),
+    each with a Month > Week > Day column drill-down via Excel's native
+    outline grouping (+/- expand). Rows are the two BDMs (the internal
+    HubSpot property `hubspot_owner_id`; rendered in the workbook as
+    "BDM") plus a Grand Total row.
   - "KPI Targets": static reference content (no API calls).
 
 Run with:  python generate_report.py
@@ -33,6 +36,7 @@ from dotenv import load_dotenv
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.properties import Outline
 
 HUBSPOT_API_BASE = "https://api.hubapi.com"
 
@@ -413,12 +417,6 @@ def _count_contacts_with_value(client: HubSpotClient, property_name: str, label:
     return data.get("total", 0)
 
 
-def iso_week_key(dt) -> tuple[int, int]:
-    """Return (iso_year, iso_week) for a datetime, Mon-start ISO week."""
-    iso = dt.isocalendar()
-    return (iso[0], iso[1])
-
-
 def parse_hubspot_datetime(value: str):
     """Parse a HubSpot ISO-8601 timestamp (e.g. createdate) into a datetime."""
     from datetime import datetime
@@ -427,22 +425,26 @@ def parse_hubspot_datetime(value: str):
     return datetime.strptime(value.split(".")[0].rstrip("Z"), "%Y-%m-%dT%H:%M:%S")
 
 
-def fetch_new_intermediaries(client: HubSpotClient, ref: ReferenceData) -> dict:
-    """KPI 1: deals in the [GCS] Institutional Relations pipeline, created
-    this year so far, with a known owner. Grouped by owner + ISO week of
-    createdate. Expected grand total: 234.
-    """
+def year_start_ms() -> int:
+    """Epoch ms for 1 Jan of the current UTC year - the shared year-to-date
+    lower bound every KPI's HubSpot query filters on."""
     from datetime import datetime, timezone
 
     year_start = datetime(datetime.now(timezone.utc).year, 1, 1, tzinfo=timezone.utc)
-    year_start_ms = int(year_start.timestamp() * 1000)
+    return int(year_start.timestamp() * 1000)
 
+
+def fetch_new_intermediaries(client: HubSpotClient, ref: ReferenceData) -> dict:
+    """Stage: New Intermediaries. Deals in the [GCS] Institutional
+    Relations pipeline, created this year so far, with a known owner.
+    Grouped by owner + calendar day of createdate.
+    """
     body = {
         "filterGroups": [
             {
                 "filters": [
                     {"propertyName": "pipeline", "operator": "EQ", "value": ref.intermediary_pipeline_id},
-                    {"propertyName": "createdate", "operator": "GTE", "value": year_start_ms},
+                    {"propertyName": "createdate", "operator": "GTE", "value": year_start_ms()},
                     {"propertyName": "hubspot_owner_id", "operator": "HAS_PROPERTY"},
                 ]
             }
@@ -464,15 +466,12 @@ def fetch_new_intermediaries(client: HubSpotClient, ref: ReferenceData) -> dict:
         if owner_id not in known_owner_ids:
             other_owner_deals.append((deal["id"], owner_id))
             continue
-        week = iso_week_key(parse_hubspot_datetime(created))
-        counts[(owner_id, week)] = counts.get((owner_id, week), 0) + 1
+        day = parse_hubspot_datetime(created).date()
+        counts[(owner_id, day)] = counts.get((owner_id, day), 0) + 1
 
     grand_total = sum(counts.values())
-    # Task spec's reference figure was 234; verified against live data (see
-    # git history) and confirmed as live-data drift, not a query bug. 233 is
-    # the accepted ground truth for this portal as of now.
-    print(f"KPI 1 (New Intermediaries): fetched {len(deals)} deals total, "
-          f"{grand_total} attributed to João/Rohan, expected 233")
+    print(f"New Intermediaries: fetched {len(deals)} deals total, "
+          f"{grand_total} attributed to João/Rohan (year-to-date)")
     if other_owner_deals:
         print(f"  {len(other_owner_deals)} deal(s) owned by someone other than João/Rohan "
               f"(excluded from BDM columns): {other_owner_deals[:10]}"
@@ -481,17 +480,20 @@ def fetch_new_intermediaries(client: HubSpotClient, ref: ReferenceData) -> dict:
 
 
 def fetch_meetings(client: HubSpotClient, ref: ReferenceData) -> tuple[dict, dict]:
-    """KPI 2 (New Meetings) and KPI 3 (New Presentations).
+    """Stages: Calls/Meetings and Presentations.
 
     Meetings associated with a deal owned by João/Rohan, where the meeting's
     attendee-owner-ids or created-by-user-id also matches João/Rohan. Split
-    by hs_activity_type: != "Presentation" (incl. unknown) -> KPI 2,
-    == "Presentation" -> KPI 3. Grouped by deal owner + ISO week of the
-    meeting's start time. Deduped by (meeting_id, deal_owner_id).
-
-    Expected grand totals: KPI 2 = 147, KPI 3 = 0.
+    by hs_activity_type: != "Presentation" (incl. unknown) -> Calls/Meetings,
+    == "Presentation" -> Presentations. Grouped by deal owner + calendar day
+    of the meeting's start time, scoped to this calendar year so far.
+    Deduped by (meeting_id, deal_owner_id).
     """
+    from datetime import date, datetime, timezone
+
     known_owner_ids = set(ref.owner_ids.values())
+    today = datetime.now(timezone.utc).date()
+    year_start_day = date(today.year, 1, 1)
 
     # 1. Deals owned by João/Rohan (any pipeline).
     body = {
@@ -524,6 +526,8 @@ def fetch_meetings(client: HubSpotClient, ref: ReferenceData) -> tuple[dict, dic
     meetings_counts: dict = {}
     presentations_counts: dict = {}
     skipped_no_start_time = []
+    skipped_prior_year = 0
+    skipped_future = 0
     for meeting in meeting_props:
         meeting_id = meeting["id"]
         props = meeting.get("properties", {})
@@ -537,28 +541,39 @@ def fetch_meetings(client: HubSpotClient, ref: ReferenceData) -> tuple[dict, dic
         if not start_time:
             skipped_no_start_time.append(meeting_id)
             continue
-        week = iso_week_key(parse_hubspot_datetime(start_time))
+        day = parse_hubspot_datetime(start_time).date()
+        if day < year_start_day:
+            skipped_prior_year += 1
+            continue
+        if day > today:
+            # Already booked in HubSpot but hasn't happened yet - doesn't
+            # belong in a "year-to-date, through today" total, and has no
+            # column to land in on the Year to Date sheet (which only goes
+            # through today).
+            skipped_future += 1
+            continue
         is_presentation = props.get("hs_activity_type") == "Presentation"
 
         for owner_id in meeting_owners.get(meeting_id, set()):
             if owner_id not in known_owner_ids:
                 continue
             bucket = presentations_counts if is_presentation else meetings_counts
-            bucket[(owner_id, week)] = bucket.get((owner_id, week), 0) + 1
+            bucket[(owner_id, day)] = bucket.get((owner_id, day), 0) + 1
 
     meetings_total = sum(meetings_counts.values())
     presentations_total = sum(presentations_counts.values())
-    # Task spec's reference figure was 147; verified against live data - no
-    # dedup/attribution bug (0 meetings attributed to both owners at once),
-    # so a 1-off is accepted as live-data drift (one deal was deleted
-    # recently) rather than chased further.
-    print(f"KPI 2 (New Meetings): {meetings_total}, expected 148")
-    print(f"KPI 3 (New Presentations): {presentations_total}, expected 0")
+    print(f"Calls/Meetings: {meetings_total} (year-to-date)")
+    print(f"Presentations: {presentations_total} (year-to-date)")
     if presentations_total:
-        print("  NOTE: KPI 3 is non-zero - flagged for review, do not assume correct.")
+        print("  NOTE: Presentations is non-zero - flagged for review, do not assume correct.")
     if skipped_no_start_time:
         print(f"  {len(skipped_no_start_time)} qualifying meeting(s) skipped for missing start time: "
               f"{skipped_no_start_time[:10]}")
+    if skipped_prior_year:
+        print(f"  {skipped_prior_year} qualifying meeting(s) excluded - before this calendar year")
+    if skipped_future:
+        print(f"  {skipped_future} qualifying meeting(s) excluded - already booked but haven't happened yet "
+              f"(start time after today)")
     return meetings_counts, presentations_counts
 
 
@@ -670,20 +685,27 @@ def _resolve_introducers(client: HubSpotClient, ref: ReferenceData, referred_con
 
 
 def fetch_referred_clients(client: HubSpotClient, ref: ReferenceData):
-    """KPI 4: Total Intermediary-Referred Clients. Task spec's reference
-    figure was 37; accepted ground truth for this portal is 20 (see the
-    printed diagnostics for why - a genuine data-population gap, not a
-    query bug).
+    """Stage: Referred Clients. Partner-Referral contacts with a
+    resolvable introducer owned by João/Rohan, scoped to this calendar
+    year so far (referred contact's createdate). Grouped by owner +
+    calendar day of createdate.
 
     Tries every lead-source candidate property and keeps whichever
-    reconciles closest to 37, since the property is genuinely ambiguous on
-    this portal (see Step 0).
+    reconciles closest to the previously-accepted all-time total of 20,
+    since the property is genuinely ambiguous on this portal (see Step 0).
+    Note: this year-to-date total is expected to be <= the all-time 20
+    accepted for the original build, since some of those 20 referred
+    clients may have been created in a prior year.
     """
-    print("KPI 4: trying each lead-source candidate against expected total 37")
+    print("KPI 4: trying each lead-source candidate (year-to-date)")
     best = None
     for property_name in ref.lead_source_candidates:
-        referred_contacts = _partner_referral_contacts(client, property_name)
-        print(f"  candidate '{property_name}': {len(referred_contacts)} Partner Referral contacts")
+        referred_contacts = _partner_referral_contacts(
+            client,
+            property_name,
+            extra_filters=[{"propertyName": "createdate", "operator": "GTE", "value": year_start_ms()}],
+        )
+        print(f"  candidate '{property_name}': {len(referred_contacts)} Partner Referral contacts (YTD)")
         introducers = _resolve_introducers(client, ref, referred_contacts)
         counts: dict = {}
         for referred in referred_contacts:
@@ -694,37 +716,33 @@ def fetch_referred_clients(client: HubSpotClient, ref: ReferenceData):
             created = referred["properties"].get("createdate")
             if not created:
                 continue
-            week = iso_week_key(parse_hubspot_datetime(created))
-            counts[(owner_id, week)] = counts.get((owner_id, week), 0) + 1
+            day = parse_hubspot_datetime(created).date()
+            counts[(owner_id, day)] = counts.get((owner_id, day), 0) + 1
         total = sum(counts.values())
         print(f"  candidate '{property_name}': grand total = {total}")
-        if best is None or abs(total - 37) < abs(best[1] - 37):
+        if best is None or abs(total - 20) < abs(best[1] - 20):
             best = (property_name, total, counts)
 
     property_name, total, counts = best
-    # Task spec's reference figure was 37. Investigated the gap thoroughly:
-    # 34 of 71 'lead_source' Partner Referral contacts have zero recorded
-    # introducer association at all (confirmed against the raw associations
-    # API, no text-field fallback either) - a genuine data-population gap on
-    # this portal, not an attribution bug. Deal-owner attribution (rather
-    # than the introducer contact's own hubspot_owner_id) was verified and
-    # used, but made no material difference here. Accepted as ground truth
-    # per explicit confirmation.
-    print(f"KPI 4 (Total Intermediary-Referred Clients): using '{property_name}', "
-          f"total = {total}, expected 20")
+    print(f"Referred Clients: using '{property_name}', total = {total} (year-to-date; "
+          f"all-time accepted ground truth was 20)")
     return property_name, counts
 
 
 def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_source_property: str):
-    """KPI 5: Total Retained Clients. Same Partner-Referral population as
-    KPI 4, filtered to lifecyclestage = Customer, with a qualifying deal
-    in [GCS] Sales Pipeline at Proposal Accepted/Closed Won. Grouped by
-    introducer's owner + ISO week of the deal's Proposal Signed Date Time.
-
-    Task spec's reference figure was 10; accepted ground truth for this
-    portal is 6 (same root cause as KPI 4 - see its docstring - cascading
-    from a smaller Customer-lifecycle subset of that population).
+    """Stage: Retained Clients. Same Partner-Referral population as the
+    Referred Clients stage (not year-scoped at the contact level - a
+    client can be referred in a prior year and retained this year),
+    filtered to lifecyclestage = Customer, with a qualifying deal in
+    [GCS] Sales Pipeline at Proposal Accepted/Closed Won whose Proposal
+    Signed Date Time falls in this calendar year so far. Grouped by
+    introducer's owner + calendar day of that signed date.
     """
+    from datetime import date, datetime, timezone
+
+    today = datetime.now(timezone.utc).date()
+    year_start_day = date(today.year, 1, 1)
+
     customers = _partner_referral_contacts(
         client,
         lead_source_property,
@@ -773,6 +791,8 @@ def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_sourc
 
     counts: dict = {}
     missing_signed_date = []
+    prior_year = []
+    future_dated = []
     for contact_id, deal_id in qualifying_deal_by_contact.items():
         if contact_id not in introducers:
             continue
@@ -781,146 +801,224 @@ def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_sourc
         if not signed_date:
             missing_signed_date.append((contact_id, deal_id))
             continue
-        week = iso_week_key(parse_hubspot_datetime(signed_date))
-        counts[(owner_id, week)] = counts.get((owner_id, week), 0) + 1
+        day = parse_hubspot_datetime(signed_date).date()
+        if day < year_start_day:
+            prior_year.append((contact_id, deal_id, day.isoformat()))
+            continue
+        if day > today:
+            # A manually-entered date field could in theory be set ahead of
+            # today by mistake - excluded for the same reason as future
+            # meetings: no column to land in on a "through today" sheet.
+            future_dated.append((contact_id, deal_id, day.isoformat()))
+            continue
+        counts[(owner_id, day)] = counts.get((owner_id, day), 0) + 1
 
     if missing_signed_date:
         print(f"  {len(missing_signed_date)} qualifying deal(s) missing Proposal Signed Date Time "
               f"(excluded): {missing_signed_date[:10]}")
+    if future_dated:
+        print(f"  {len(future_dated)} qualifying deal(s) with a Proposal Signed Date Time after today "
+              f"(excluded): {future_dated[:10]}")
+    if prior_year:
+        print(f"  {len(prior_year)} qualifying deal(s) signed before this calendar year "
+              f"(excluded from year-to-date): {prior_year[:10]}")
 
     total = sum(counts.values())
-    print(f"KPI 5 (Total Retained Clients): {total}, expected 6")
+    print(f"Retained Clients: {total} (year-to-date; all-time accepted ground truth was 6)")
     return counts
 
 
 # --- Excel assembly -----------------------------------------------------
 
-# (title, expected/accepted grand total, note for the reconciliation table)
-KPI_GROUPS = [
-    ("New Intermediaries", 233, "task spec said 234; live-data drift, verified no query bug"),
-    ("New Meetings", 148, "task spec said 147; live-data drift (a deal was deleted recently)"),
-    ("New Presentations", 0, "exact match"),
-    ("Total Intermediary-Referred Clients", 20, "task spec said 37; genuine data gap - 34/71 "
-     "referred contacts have no recorded introducer association"),
-    ("Total Retained Clients", 6, "task spec said 10; same root cause as above"),
-]
+# Stage column order, left to right, per explicit request (reverse-funnel:
+# retained/referred outcomes first, activity volume last).
+STAGE_LABELS = ["Retained Clients", "Referred Clients", "New Intermediaries", "Presentations", "Calls/Meetings"]
+
+MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
-def iso_week_range(kpi_data_list: list) -> list:
-    """Continuous list of (iso_year, iso_week) Mon-start weeks spanning the
-    earliest to latest week across all KPI data, with no gaps skipped."""
-    all_weeks = [week for counts in kpi_data_list for (_, week) in counts.keys()]
-    if not all_weeks:
-        return []
-    mondays = [date.fromisocalendar(year, week, 1) for year, week in all_weeks]
-    start, end = min(mondays), max(mondays)
-    weeks = []
-    current = start
-    while current <= end:
-        iso = current.isocalendar()
-        weeks.append((iso[0], iso[1]))
-        current = date.fromordinal(current.toordinal() + 7)
-    return weeks
+def build_calendar_hierarchy(today: date) -> list:
+    """Year-to-date calendar hierarchy: January through the current month,
+    each month partitioned into weeks that never cross a month boundary
+    (a global ISO week spanning two months is clipped into two partial
+    groups), each week listing its elapsed days only (1 Jan through
+    today - no future placeholder columns). This is what makes an
+    in-progress month/week automatically read as "to-date" and a finished
+    one show the full period, with no special-case branching needed.
+
+    Returns [(month_index, month_name, [(week_label, [day, ...]), ...]), ...]
+    """
+    year = today.year
+    months = []
+    for month_index in range(1, today.month + 1):
+        first_of_month = date(year, month_index, 1)
+        if month_index == today.month:
+            last_day_this_month = today
+        else:
+            next_month = date(year, month_index + 1, 1) if month_index < 12 else date(year + 1, 1, 1)
+            last_day_this_month = date.fromordinal(next_month.toordinal() - 1)
+
+        weeks = []
+        current_week_label = None
+        current_week_days: list = []
+        day_ord = first_of_month.toordinal()
+        while day_ord <= last_day_this_month.toordinal():
+            day = date.fromordinal(day_ord)
+            week_label = f"W{day.isocalendar()[1]}"
+            if week_label != current_week_label:
+                if current_week_days:
+                    weeks.append((current_week_label, current_week_days))
+                current_week_label = week_label
+                current_week_days = []
+            current_week_days.append(day)
+            day_ord += 1
+        if current_week_days:
+            weeks.append((current_week_label, current_week_days))
+
+        months.append((month_index, MONTH_NAMES[month_index - 1], weeks))
+    return months
 
 
-def build_workbook(kpi_data_list: list, ref: ReferenceData) -> tuple:
-    """Assemble the two-sheet workbook. kpi_data_list is the five KPI
-    {(owner_id, iso_week): count} dicts in KPI_GROUPS order. Returns
-    (workbook, {sheet_name: {cell_ref: value}}) - the second is the Grand
-    Total row's already-known values, used to inject cached formula
+def build_workbook(kpi_data_list: list, ref: ReferenceData, today: date) -> tuple:
+    """Assemble the two-sheet workbook. kpi_data_list is the five stage
+    {(owner_id, day): count} dicts in STAGE_LABELS order. Returns
+    (workbook, {sheet_name: {cell_ref: value}}) - the second is every
+    formula cell's already-known value, used to inject cached formula
     results if a LibreOffice recalculation pass isn't available."""
     wb = Workbook()
-    grand_total_cells = _build_weekly_summary_sheet(wb, kpi_data_list, ref)
+    formula_cells = _build_year_to_date_sheet(wb, kpi_data_list, ref, today)
     _build_kpi_targets_sheet(wb)
-    return wb, {"Weekly Summary": grand_total_cells}
+    return wb, {"Year to Date": formula_cells}
 
 
-def _build_weekly_summary_sheet(wb: Workbook, kpi_data_list: list, ref: ReferenceData) -> dict:
+def _build_year_to_date_sheet(wb: Workbook, kpi_data_list: list, ref: ReferenceData, today: date) -> dict:
+    """Stage (top-level column) > Month > Week > Day, via Excel's native
+    column outline grouping (+/- expand). Month-total columns are always
+    visible (outline level 0); Week-total columns (level 1) and Day
+    columns (level 2) are collapsed by default - expanding a Month
+    reveals its Weeks, expanding a Week reveals its Days. Rows are the
+    two BDMs plus a Grand Total row.
+    """
     ws = wb.active
-    ws.title = "Weekly Summary"
+    ws.title = "Year to Date"
+    ws.sheet_properties.outlinePr = Outline(summaryRight=True)
 
     joao_id, rohan_id = ref.owner_ids["joao"], ref.owner_ids["rohan"]
-    weeks = iso_week_range(kpi_data_list)
+    calendar = build_calendar_hierarchy(today)
 
-    # --- Header (two rows): col A = "ISO Week" / "Week Starting" (merged
-    # vertically), then one merged pair of sub-columns per KPI group.
+    joao_row, rohan_row, total_row = 3, 4, 5
+    ws.cell(row=joao_row, column=1, value="João Pacheco Gonçalves (BDM)").font = BODY_FONT
+    ws.cell(row=rohan_row, column=1, value="Rohan Harris (BDM)").font = BODY_FONT
+    ws.cell(row=total_row, column=1, value="Grand Total").font = Font(name=FONT_BODY, color=BODY_TEXT, bold=True)
     ws.merge_cells("A1:A2")
-    ws["A1"] = "ISO Week"
-    ws.merge_cells("B1:B2")
-    ws["B1"] = "Week Starting"
+    ws["A1"] = "BDM"
 
-    col = 3
-    for title, _, _ in KPI_GROUPS:
-        ws.merge_cells(start_row=1, start_column=col, end_row=1, end_column=col + 1)
-        ws.cell(row=1, column=col, value=title)
-        ws.cell(row=2, column=col, value="João Pacheco Gonçalves (BDM)")
-        ws.cell(row=2, column=col + 1, value="Rohan Harris (BDM)")
-        col += 2
+    formula_cells: dict = {}
+    col = 2
+    for stage_label, counts in zip(STAGE_LABELS, kpi_data_list):
+        stage_start_col = col
+        for _month_index, month_name, weeks in calendar:
+            month_start_col = col
+            month_day_cols = []
+            for week_label, days in weeks:
+                week_start_col = col
+                for day in days:
+                    day_count = {
+                        joao_row: counts.get((joao_id, day), 0),
+                        rohan_row: counts.get((rohan_id, day), 0),
+                    }
+                    ws.cell(row=2, column=col, value=day.isoformat()).font = MONO_FONT
+                    for row, value in day_count.items():
+                        ws.cell(row=row, column=col, value=value).font = BODY_FONT
+                    ws.cell(row=total_row, column=col, value=f"=SUM({get_column_letter(col)}{joao_row}:"
+                            f"{get_column_letter(col)}{rohan_row})")
+                    formula_cells[f"{get_column_letter(col)}{total_row}"] = day_count[joao_row] + day_count[rohan_row]
+                    ws.column_dimensions[get_column_letter(col)].outline_level = 2
+                    ws.column_dimensions[get_column_letter(col)].hidden = True
+                    ws.column_dimensions[get_column_letter(col)].width = 11
+                    col += 1
+                month_day_cols.append((week_start_col, col - 1))
+
+                week_total_col = col
+                week_col_letter = get_column_letter(week_total_col)
+                first_day_letter, last_day_letter = get_column_letter(week_start_col), get_column_letter(col - 1)
+                ws.cell(row=2, column=week_total_col, value=f"{week_label} Total").font = MONO_FONT
+                for row in (joao_row, rohan_row):
+                    row_letter_formula = f"=SUM({first_day_letter}{row}:{last_day_letter}{row})"
+                    ws.cell(row=row, column=week_total_col, value=row_letter_formula).font = BODY_FONT
+                    formula_cells[f"{week_col_letter}{row}"] = sum(
+                        counts.get((joao_id if row == joao_row else rohan_id, d), 0) for d in days
+                    )
+                ws.cell(row=total_row, column=week_total_col,
+                        value=f"=SUM({week_col_letter}{joao_row}:{week_col_letter}{rohan_row})")
+                formula_cells[f"{week_col_letter}{total_row}"] = sum(
+                    counts.get((owner, d), 0) for owner in (joao_id, rohan_id) for d in days
+                )
+                ws.column_dimensions[week_col_letter].outline_level = 1
+                ws.column_dimensions[week_col_letter].hidden = True
+                ws.column_dimensions[week_col_letter].width = 13
+                col += 1
+
+            month_total_col = col
+            month_col_letter = get_column_letter(month_total_col)
+            all_month_days = [d for _wl, days in weeks for d in days]
+            ws.cell(row=2, column=month_total_col, value=f"{month_name} Total").font = Font(
+                name=FONT_BODY, color=BODY_TEXT, bold=True
+            )
+            # Week-total columns for this month sit one column after each week's
+            # last day column (week_end_col + 1). They are NOT contiguous with
+            # each other (each week's day columns sit between them), so the
+            # month total must reference them as an explicit cell list, not a
+            # column range - a range would double-count the day columns too.
+            week_total_cols = [end + 1 for _start, end in month_day_cols]
+            for row in (joao_row, rohan_row):
+                cell_refs = ",".join(f"{get_column_letter(c)}{row}" for c in week_total_cols)
+                ws.cell(row=row, column=month_total_col, value=f"=SUM({cell_refs})").font = (
+                    Font(name=FONT_BODY, color=BODY_TEXT, bold=True)
+                )
+                formula_cells[f"{month_col_letter}{row}"] = sum(
+                    counts.get((joao_id if row == joao_row else rohan_id, d), 0) for d in all_month_days
+                )
+            ws.cell(row=total_row, column=month_total_col,
+                    value=f"=SUM({month_col_letter}{joao_row}:{month_col_letter}{rohan_row})").font = Font(
+                name=FONT_BODY, color=BODY_TEXT, bold=True
+            )
+            formula_cells[f"{month_col_letter}{total_row}"] = sum(
+                counts.get((owner, d), 0) for owner in (joao_id, rohan_id) for d in all_month_days
+            )
+            ws.column_dimensions[month_col_letter].outline_level = 0
+            ws.column_dimensions[month_col_letter].width = 13
+            col += 1
+
+        stage_end_col = col - 1
+        ws.merge_cells(start_row=1, start_column=stage_start_col, end_row=1, end_column=stage_end_col)
+        ws.cell(row=1, column=stage_start_col, value=stage_label)
+
     last_col = col - 1
 
-    for row in (1, 2):
-        for c in range(1, last_col + 1):
+    # --- Styling pass
+    for c in range(1, last_col + 1):
+        for row in (1, 2):
             cell = ws.cell(row=row, column=c)
             cell.fill = HEADER_FILL
             cell.font = HEADER_FONT
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell.border = THIN_BORDER
-
-    # --- Data rows
-    first_data_row = 3
-    for i, (year, week) in enumerate(weeks):
-        row = first_data_row + i
-        monday = date.fromisocalendar(year, week, 1)
-        ws.cell(row=row, column=1, value=f"{year}-W{week:02d}").font = MONO_FONT
-        ws.cell(row=row, column=2, value=monday).font = BODY_FONT
-        ws.cell(row=row, column=2).number_format = "dd mmm yyyy"
-
-        col = 3
-        for counts in kpi_data_list:
-            ws.cell(row=row, column=col, value=counts.get((joao_id, (year, week)), 0)).font = BODY_FONT
-            ws.cell(row=row, column=col + 1, value=counts.get((rohan_id, (year, week)), 0)).font = BODY_FONT
-            col += 2
-
-        for c in range(1, last_col + 1):
+        for row in (joao_row, rohan_row):
             cell = ws.cell(row=row, column=c)
             cell.border = THIN_BORDER
-            if c > 2:
+            if c > 1:
                 cell.alignment = Alignment(horizontal="center")
+        total_cell = ws.cell(row=total_row, column=c)
+        total_cell.border = THIN_BORDER
+        total_cell.fill = GRAND_TOTAL_FILL
+        if c > 1:
+            total_cell.alignment = Alignment(horizontal="center")
 
-    # --- Grand Total row: real SUM() formulas, not hardcoded totals. We
-    # already know the answer from kpi_data_list, so we hand it back to the
-    # caller (grand_total_cells) to inject as the formula's cached result
-    # if no recalculation engine is available - the displayed number is
-    # never hardcoded into the formula itself, only cached alongside it.
-    total_row = first_data_row + len(weeks)
-    last_data_row = total_row - 1
-    ws.cell(row=total_row, column=1, value="Grand Total").font = Font(name=FONT_BODY, color=BODY_TEXT, bold=True)
-    ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=2)
-    grand_total_cells = {}
-    col = 3
-    for counts in kpi_data_list:
-        for owner_id in (joao_id, rohan_id):
-            col_letter = get_column_letter(col)
-            formula = f"=SUM({col_letter}{first_data_row}:{col_letter}{last_data_row})" if weeks else "=SUM()"
-            ws.cell(row=total_row, column=col, value=formula).font = Font(name=FONT_BODY, color=BODY_TEXT, bold=True)
-            grand_total_cells[f"{col_letter}{total_row}"] = sum(
-                v for (owner, week), v in counts.items() if owner == owner_id
-            )
-            col += 1
-    for c in range(1, last_col + 1):
-        cell = ws.cell(row=total_row, column=c)
-        cell.fill = GRAND_TOTAL_FILL
-        cell.border = THIN_BORDER
-        if c > 2:
-            cell.alignment = Alignment(horizontal="center")
+    ws.freeze_panes = "B3"
+    ws.column_dimensions["A"].width = 26
 
-    ws.freeze_panes = "C3"
-    ws.column_dimensions["A"].width = 12
-    ws.column_dimensions["B"].width = 15
-    for c in range(3, last_col + 1):
-        ws.column_dimensions[get_column_letter(c)].width = 24
-
-    return grand_total_cells
+    return formula_cells
 
 
 def _build_kpi_targets_sheet(wb: Workbook) -> None:
@@ -929,13 +1027,16 @@ def _build_kpi_targets_sheet(wb: Workbook) -> None:
     ws["A1"] = "Minimum Annual KPIs"
     ws["A1"].font = TITLE_FONT
 
+    # Ordered to match the Year to Date sheet's Stage column order:
+    # Retained -> Referred -> New Intermediaries -> Presentations ->
+    # Calls/Meetings.
     headers = ["KPI", "Minimum Target"]
     rows = [
-        ("New self-sourced intermediaries", "150/year (~12/month, ~3/week)"),
-        ("Calls / meetings", "460/year (~38/month, ~9/week)"),
-        ("Presentations", "40/year (~3/month, ~1/week)"),
-        ("Intermediary-referred clients", "36/year (~3/month)"),
         ("Retained clients (minimum)", "12/year (~1/month)"),
+        ("Intermediary-referred clients", "36/year (~3/month)"),
+        ("New self-sourced intermediaries", "150/year (~12/month, ~3/week)"),
+        ("Presentations", "40/year (~3/month, ~1/week)"),
+        ("Calls / meetings", "460/year (~38/month, ~9/week)"),
     ]
     header_row = 3
     for c, header in enumerate(headers, start=1):
@@ -1073,16 +1174,17 @@ def recalculate_workbook(xlsx_path: str, sheet_cell_values: dict) -> None:
 
 
 def print_reconciliation_table(kpi_data_list: list) -> None:
-    print("\n=== Reconciliation ===")
-    print(f"{'KPI':<40} {'Expected':>10} {'Computed':>10} {'Match?':>8}")
-    for (title, expected, note), counts in zip(KPI_GROUPS, kpi_data_list):
-        computed = sum(counts.values())
-        match = "YES" if computed == expected else "NO"
-        print(f"{title:<40} {expected:>10} {computed:>10} {match:>8}")
-        if match == "NO":
-            print(f"    MISMATCH - diff {computed - expected:+d}")
-        elif "task spec said" in note:
-            print(f"    (accepted ground truth - {note})")
+    """Print each stage's year-to-date grand total. There's no fixed
+    "expected" figure to check against any more (unlike the original
+    all-time build) - the whole point of this table is a live number that
+    changes daily. Each fetch function already prints its own reasoning
+    when a total is noteworthy (e.g. Retained Clients dropping once
+    scoped to this year); this is just the final at-a-glance summary.
+    """
+    print("\n=== Year-to-Date Summary ===")
+    print(f"{'Stage':<24} {'YTD Total':>10}")
+    for title, counts in zip(STAGE_LABELS, kpi_data_list):
+        print(f"{title:<24} {sum(counts.values()):>10}")
 
 
 def main() -> int:
@@ -1096,10 +1198,15 @@ def main() -> int:
     lead_source_property, referred_clients = fetch_referred_clients(client, ref)
     retained_clients = fetch_retained_clients(client, ref, lead_source_property)
 
-    kpi_data_list = [new_intermediaries, new_meetings, new_presentations, referred_clients, retained_clients]
+    # Order matches STAGE_LABELS: Retained -> Referred -> New Intermediaries
+    # -> Presentations -> Calls/Meetings.
+    kpi_data_list = [retained_clients, referred_clients, new_intermediaries, new_presentations, new_meetings]
 
     print("\nBuilding workbook...")
-    wb, sheet_cell_values = build_workbook(kpi_data_list, ref)
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).date()
+    wb, sheet_cell_values = build_workbook(kpi_data_list, ref, today)
     os.makedirs("reports", exist_ok=True)
     xlsx_path = os.path.join("reports", "reports.xlsx")
     wb.save(xlsx_path)

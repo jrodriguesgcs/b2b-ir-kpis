@@ -1,9 +1,12 @@
 # B2B Intermediary-Referral KPI Report Generator
 
 Pulls deal, meeting and contact data from HubSpot and writes a styled,
-two-sheet Excel workbook (`reports/reports.xlsx`) tracking five weekly KPIs
-for the Institutional Relations BDMs (João Pacheco Gonçalves and Rohan
-Harris), plus a static reference sheet of annual KPI targets.
+two-sheet Excel workbook (`reports/reports.xlsx`) tracking five
+year-to-date stages (Retained Clients, Referred Clients, New
+Intermediaries, Presentations, Calls/Meetings) for the Institutional
+Relations BDMs (João Pacheco Gonçalves and Rohan Harris), with a
+click-to-expand Month → Week → Day drill-down, plus a static reference
+sheet of annual KPI targets.
 
 Runs automatically every week via GitHub Actions, committing the
 regenerated report back to the repo and emailing it as an attachment -
@@ -64,70 +67,68 @@ between runs. It prints, in order:
 1. **Step 0** - every ID/value it resolved from the portal (association
    labels, the lead-source property, pipeline/stage IDs, the
    `lifecyclestage` "Customer" value, and the two BDMs' owner IDs) so you
-   can sanity-check them against your portal before trusting the KPI
-   numbers below.
-2. Each KPI's own diagnostics as it's computed - counts, and any anomalies
-   it found along the way (referred contacts with no recorded introducer,
-   contacts with multiple qualifying deals, etc.), so a data-quality gap
-   is visible immediately rather than buried in a final total.
-3. A final **reconciliation table**.
+   can sanity-check them against your portal before trusting the numbers
+   below.
+2. Each stage's own diagnostics as it's computed - counts, and any
+   anomalies it found along the way (referred contacts with no recorded
+   introducer, contacts with multiple qualifying deals, meetings already
+   booked for a future date, etc.), so a data-quality gap is visible
+   immediately rather than buried in a final total.
+3. A final **Year-to-Date Summary** - one line per stage with its current
+   grand total.
 
 On any failure (missing token, a HubSpot API error, rate-limiting
 exhausted after retries) the script exits non-zero with a clear message
 on stderr.
 
-### The reconciliation table
+### Reading the numbers
 
-```
-=== Reconciliation ===
-KPI                                        Expected   Computed   Match?
-New Intermediaries                              233        233      YES
-New Meetings                                    148        148      YES
-New Presentations                                 0          0      YES
-Total Intermediary-Referred Clients              20         20      YES
-Total Retained Clients                             6          6      YES
-```
+Every stage is scoped to **this calendar year, through today** - a
+meeting already booked for next week, or a deal signed last year, is
+excluded from the current total (the script tells you when it excludes
+something like that, and why). Because of this, the totals move day to
+day, and don't chase a single fixed "expected" figure the way an
+all-time report would. Two things worth knowing if a number looks lower
+than you expected:
 
-"Expected" here is the **accepted ground truth for this portal**, not a
-fixed constant - each KPI's number was individually verified against the
-live HubSpot data during development, and any gap between the original
-task brief's reference figures and what the API actually returns was
-root-caused (not silently patched over) before being accepted:
-
-- **New Intermediaries / New Meetings**: this portal is live and actively
-  changing - deals get created, meetings get logged, records get deleted
-  day-to-day. A ±1 drift here reflects that, not a bug (verified: no
-  timezone boundary issue, no double-counting).
-- **Total Intermediary-Referred Clients / Total Retained Clients**: the
-  bigger gap here traces to a genuine data-population issue on the
-  portal - a meaningful fraction of contacts marked as a Partner Referral
-  have no recorded "Introducer" association at all, so they can't be
-  attributed to a BDM. This is visible in the script's printed
-  diagnostics (which contacts, and why each was excluded), not swept under
-  the total.
-
-If you re-run this against a portal where the underlying data has
-genuinely changed, expect the computed numbers to move - the script will
-tell you plainly if a KPI's mismatch looks larger than ordinary drift
-("MISMATCH" instead of the accepted-ground-truth note).
+- **Retained Clients** in particular can look small this early in the
+  year - it only counts deals actually signed within the current year, so
+  a deal signed last year for a client referred last year won't show up
+  even though that client is genuinely retained.
+- Any KPI-population gap the script finds (e.g. a Partner-Referral
+  contact with no recorded introducer association) is logged with the
+  specific contact/deal IDs responsible, not silently dropped.
 
 ## What's in the workbook
 
-- **Weekly Summary** (primary sheet): one row per ISO week (Monday-start),
-  continuous from the earliest to the latest week across all five KPIs -
-  weeks are never skipped, even if every metric is blank. Each KPI has two
-  sub-columns, one per BDM. The Grand Total row uses real `SUM()`
-  formulas, not hardcoded totals.
+- **Year to Date** (primary sheet): **Stage** is the top-level column
+  grouping, in this order: Retained Clients, Referred Clients, New
+  Intermediaries, Presentations, Calls/Meetings. Each Stage's columns
+  drill down Month → Week → Day using Excel's native **column outline
+  grouping** - only the Month-total columns are visible by default;
+  click the **+** control above a Month to reveal its Week-total columns,
+  and click **+** again above a Week to reveal its individual Days. This
+  works in Excel, LibreOffice Calc, and Google Sheets (via File → Import
+  or opening the .xlsx directly) - look for small **+ / −** buttons in
+  the grey bar just above the column headers. Rows are the two BDMs plus
+  a Grand Total row. Every Week/Month total is a real `SUM()` formula
+  over its own Day/Week columns, never a hardcoded number.
 - **KPI Targets**: static reference content (the minimum annual KPI
-  targets and the detailed rationale behind them) - no API calls.
+  targets and the detailed rationale behind them, reordered to match the
+  Year to Date sheet's Stage order) - no API calls.
+
+An in-progress month or week is never padded with future placeholder
+columns - it simply has fewer Day columns than a finished one, which is
+what makes its total read as "month-to-date" / "week-to-date" without any
+special-case logic.
 
 Formulas are recalculated before the file is saved so it opens with real
 totals, not formula placeholders that need an app to compute them. The
 script prefers a headless LibreOffice round-trip for this and falls back
-automatically to writing the already-known Grand Total values as cached
-formula results if LibreOffice isn't available in the running
-environment - either way, the formula itself is always the real `SUM()`,
-never a hardcoded value.
+automatically to writing the already-known values as cached formula
+results if LibreOffice isn't available in the running environment -
+either way, the formula itself is always the real `SUM()`, never a
+hardcoded value.
 
 ### Terminology note
 
