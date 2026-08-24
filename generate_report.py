@@ -61,6 +61,32 @@ MONO_FONT = Font(name=FONT_MONO, color=BODY_TEXT)
 TITLE_FONT = Font(name=FONT_TITLE, color=NIGHT_BLUE, bold=False, size=14)
 MUTED_ITALIC_FONT = Font(name=FONT_BODY, color=BODY_TEXT, italic=True, size=9)
 
+# Per-Stage header colours: the GCS design system's own documented 5-slot
+# categorical chart palette (--chart-1..5 = primary, accent,
+# muted-foreground, border, muted), in boldness order, mapped 1:1 onto
+# STAGE_LABELS (Retained Clients first = most important outcome = boldest
+# colour). muted-foreground/muted are only specified as HSL in the design
+# doc (hsl(221 13% 46%) / hsl(218 21% 93%)) - converted to hex precisely;
+# chart-4 (border tint) reuses the existing TINT_BLUE constant rather than
+# introduce a near-duplicate hex.
+CHART_MUTED_FOREGROUND = "667085"  # hsl(221 13% 46%)
+CHART_MUTED = "E9ECF1"  # hsl(218 21% 93%)
+
+STAGE_FILLS = [
+    PatternFill(fill_type="solid", fgColor=NIGHT_BLUE),
+    PatternFill(fill_type="solid", fgColor=ELECTRIC_BLUE),
+    PatternFill(fill_type="solid", fgColor=CHART_MUTED_FOREGROUND),
+    PatternFill(fill_type="solid", fgColor=TINT_BLUE),
+    PatternFill(fill_type="solid", fgColor=CHART_MUTED),
+]
+STAGE_FONTS = [
+    Font(name=FONT_BODY, color="FFFFFF", bold=True),
+    Font(name=FONT_BODY, color="FFFFFF", bold=True),
+    Font(name=FONT_BODY, color="FFFFFF", bold=True),
+    Font(name=FONT_BODY, color=NIGHT_BLUE, bold=True),
+    Font(name=FONT_BODY, color=NIGHT_BLUE, bold=True),
+]
+
 # Search API / associations endpoints have a tighter effective rate limit
 # (~4-5 req/s) than the general API. A small fixed delay before each such
 # call keeps us comfortably under it without needing per-call bookkeeping.
@@ -905,6 +931,7 @@ def _build_year_to_date_sheet(wb: Workbook, kpi_data_list: list, ref: ReferenceD
 
     joao_id, rohan_id = ref.owner_ids["joao"], ref.owner_ids["rohan"]
     calendar = build_calendar_hierarchy(today)
+    year_suffix = f"{today.year % 100:02d}"
 
     joao_row, rohan_row, total_row = 3, 4, 5
     ws.cell(row=joao_row, column=1, value="João Pacheco Gonçalves (BDM)").font = BODY_FONT
@@ -912,13 +939,20 @@ def _build_year_to_date_sheet(wb: Workbook, kpi_data_list: list, ref: ReferenceD
     ws.cell(row=total_row, column=1, value="Grand Total").font = Font(name=FONT_BODY, color=BODY_TEXT, bold=True)
     ws.merge_cells("A1:A2")
     ws["A1"] = "BDM"
+    for row in (1, 2):
+        cell = ws.cell(row=row, column=1)
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = THIN_BORDER
 
     formula_cells: dict = {}
     col = 2
-    for stage_label, counts in zip(STAGE_LABELS, kpi_data_list):
+    for stage_index, (stage_label, counts) in enumerate(zip(STAGE_LABELS, kpi_data_list)):
         stage_start_col = col
-        for _month_index, month_name, weeks in calendar:
+        for month_index, _month_name, weeks in calendar:
             month_start_col = col
+            month_prefix = f"{month_index:02d}/{year_suffix}"
             month_day_cols = []
             for week_label, days in weeks:
                 week_start_col = col
@@ -942,7 +976,7 @@ def _build_year_to_date_sheet(wb: Workbook, kpi_data_list: list, ref: ReferenceD
                 week_total_col = col
                 week_col_letter = get_column_letter(week_total_col)
                 first_day_letter, last_day_letter = get_column_letter(week_start_col), get_column_letter(col - 1)
-                ws.cell(row=2, column=week_total_col, value=f"{week_label} Total").font = MONO_FONT
+                ws.cell(row=2, column=week_total_col, value=f"{month_prefix} {week_label} Total").font = MONO_FONT
                 for row in (joao_row, rohan_row):
                     row_letter_formula = f"=SUM({first_day_letter}{row}:{last_day_letter}{row})"
                     ws.cell(row=row, column=week_total_col, value=row_letter_formula).font = BODY_FONT
@@ -956,13 +990,18 @@ def _build_year_to_date_sheet(wb: Workbook, kpi_data_list: list, ref: ReferenceD
                 )
                 ws.column_dimensions[week_col_letter].outline_level = 1
                 ws.column_dimensions[week_col_letter].hidden = True
+                # Marks this group's subordinate level (Days) as starting
+                # collapsed - without this, Excel's expand/collapse behaviour
+                # at this boundary is undefined and can inconsistently
+                # cascade into the Day level on a single click.
+                ws.column_dimensions[week_col_letter].collapsed = True
                 ws.column_dimensions[week_col_letter].width = 13
                 col += 1
 
             month_total_col = col
             month_col_letter = get_column_letter(month_total_col)
             all_month_days = [d for _wl, days in weeks for d in days]
-            ws.cell(row=2, column=month_total_col, value=f"{month_name} Total").font = Font(
+            ws.cell(row=2, column=month_total_col, value=f"{month_prefix} Total").font = Font(
                 name=FONT_BODY, color=BODY_TEXT, bold=True
             )
             # Week-total columns for this month sit one column after each week's
@@ -987,6 +1026,11 @@ def _build_year_to_date_sheet(wb: Workbook, kpi_data_list: list, ref: ReferenceD
                 counts.get((owner, d), 0) for owner in (joao_id, rohan_id) for d in all_month_days
             )
             ws.column_dimensions[month_col_letter].outline_level = 0
+            # Marks this Stage's Week level as starting collapsed for the
+            # same reason as the Week-total columns above - a Month-total
+            # column with outline_level=0 but no collapsed flag is exactly
+            # what let some months' "+" cascade straight to Day level.
+            ws.column_dimensions[month_col_letter].collapsed = True
             ws.column_dimensions[month_col_letter].width = 13
             col += 1
 
@@ -994,16 +1038,22 @@ def _build_year_to_date_sheet(wb: Workbook, kpi_data_list: list, ref: ReferenceD
         ws.merge_cells(start_row=1, start_column=stage_start_col, end_row=1, end_column=stage_end_col)
         ws.cell(row=1, column=stage_start_col, value=stage_label)
 
+        # Per-Stage header colour (rows 1-2), for at-a-glance scannability -
+        # GCS design system's documented --chart-1..5 categorical palette.
+        stage_fill, stage_font = STAGE_FILLS[stage_index], STAGE_FONTS[stage_index]
+        for c in range(stage_start_col, stage_end_col + 1):
+            for row in (1, 2):
+                cell = ws.cell(row=row, column=c)
+                cell.fill = stage_fill
+                cell.font = stage_font
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.border = THIN_BORDER
+
     last_col = col - 1
 
-    # --- Styling pass
+    # --- Styling pass (data rows + borders; header colours already applied
+    # per Stage above)
     for c in range(1, last_col + 1):
-        for row in (1, 2):
-            cell = ws.cell(row=row, column=c)
-            cell.fill = HEADER_FILL
-            cell.font = HEADER_FONT
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            cell.border = THIN_BORDER
         for row in (joao_row, rohan_row):
             cell = ws.cell(row=row, column=c)
             cell.border = THIN_BORDER
