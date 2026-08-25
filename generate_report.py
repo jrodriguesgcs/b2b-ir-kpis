@@ -884,23 +884,28 @@ def build_calendar_hierarchy(today: date) -> list:
             next_month = date(year, month_index + 1, 1) if month_index < 12 else date(year + 1, 1, 1)
             last_day_this_month = date.fromordinal(next_month.toordinal() - 1)
 
-        weeks = []
-        current_week_label = None
+        # Group consecutive days by ISO week (clipping at the month
+        # boundary), then relabel sequentially as W1, W2, ... *within this
+        # month* - each month restarts its own W1, rather than carrying
+        # the year's global ISO week number across month boundaries.
+        raw_weeks = []
+        current_iso_week = None
         current_week_days: list = []
         day_ord = first_of_month.toordinal()
         while day_ord <= last_day_this_month.toordinal():
             day = date.fromordinal(day_ord)
-            week_label = f"W{day.isocalendar()[1]}"
-            if week_label != current_week_label:
+            iso_week = day.isocalendar()[1]
+            if iso_week != current_iso_week:
                 if current_week_days:
-                    weeks.append((current_week_label, current_week_days))
-                current_week_label = week_label
+                    raw_weeks.append(current_week_days)
+                current_iso_week = iso_week
                 current_week_days = []
             current_week_days.append(day)
             day_ord += 1
         if current_week_days:
-            weeks.append((current_week_label, current_week_days))
+            raw_weeks.append(current_week_days)
 
+        weeks = [(f"W{i + 1}", days) for i, days in enumerate(raw_weeks)]
         months.append((month_index, MONTH_NAMES[month_index - 1], weeks))
     return months
 
@@ -931,14 +936,13 @@ def _build_year_to_date_sheet(wb: Workbook, kpi_data_list: list, ref: ReferenceD
 
     joao_id, rohan_id = ref.owner_ids["joao"], ref.owner_ids["rohan"]
     calendar = build_calendar_hierarchy(today)
-    year_suffix = f"{today.year % 100:02d}"
 
     joao_row, rohan_row, total_row = 3, 4, 5
-    ws.cell(row=joao_row, column=1, value="João Pacheco Gonçalves (BDM)").font = BODY_FONT
-    ws.cell(row=rohan_row, column=1, value="Rohan Harris (BDM)").font = BODY_FONT
+    ws.cell(row=joao_row, column=1, value="João Pacheco Gonçalves").font = BODY_FONT
+    ws.cell(row=rohan_row, column=1, value="Rohan Harris").font = BODY_FONT
     ws.cell(row=total_row, column=1, value="Grand Total").font = Font(name=FONT_BODY, color=BODY_TEXT, bold=True)
     ws.merge_cells("A1:A2")
-    ws["A1"] = "BDM"
+    ws["A1"] = str(today.year)
     for row in (1, 2):
         cell = ws.cell(row=row, column=1)
         cell.fill = HEADER_FILL
@@ -950,9 +954,8 @@ def _build_year_to_date_sheet(wb: Workbook, kpi_data_list: list, ref: ReferenceD
     col = 2
     for stage_index, (stage_label, counts) in enumerate(zip(STAGE_LABELS, kpi_data_list)):
         stage_start_col = col
-        for month_index, _month_name, weeks in calendar:
+        for month_index, month_name, weeks in calendar:
             month_start_col = col
-            month_prefix = f"{month_index:02d}/{year_suffix}"
             month_day_cols = []
             for week_label, days in weeks:
                 week_start_col = col
@@ -976,7 +979,7 @@ def _build_year_to_date_sheet(wb: Workbook, kpi_data_list: list, ref: ReferenceD
                 week_total_col = col
                 week_col_letter = get_column_letter(week_total_col)
                 first_day_letter, last_day_letter = get_column_letter(week_start_col), get_column_letter(col - 1)
-                ws.cell(row=2, column=week_total_col, value=f"{month_prefix} {week_label} Total").font = MONO_FONT
+                ws.cell(row=2, column=week_total_col, value=f"{week_label} {month_name}").font = MONO_FONT
                 for row in (joao_row, rohan_row):
                     row_letter_formula = f"=SUM({first_day_letter}{row}:{last_day_letter}{row})"
                     ws.cell(row=row, column=week_total_col, value=row_letter_formula).font = BODY_FONT
@@ -1001,7 +1004,7 @@ def _build_year_to_date_sheet(wb: Workbook, kpi_data_list: list, ref: ReferenceD
             month_total_col = col
             month_col_letter = get_column_letter(month_total_col)
             all_month_days = [d for _wl, days in weeks for d in days]
-            ws.cell(row=2, column=month_total_col, value=f"{month_prefix} Total").font = Font(
+            ws.cell(row=2, column=month_total_col, value=f"{month_name} Total").font = Font(
                 name=FONT_BODY, color=BODY_TEXT, bold=True
             )
             # Week-total columns for this month sit one column after each week's
