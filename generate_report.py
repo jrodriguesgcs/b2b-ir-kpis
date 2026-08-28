@@ -25,6 +25,7 @@ delivery, and secrets management beyond a local .env file. See README.md.
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import subprocess
@@ -33,7 +34,7 @@ import tempfile
 import time
 import zipfile
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 
 import requests
 from dotenv import load_dotenv
@@ -1427,6 +1428,63 @@ def print_reconciliation_table(kpi_data_list: list) -> None:
         print(f"{title:<24} {sum(counts.values()):>10}")
 
 
+# Stage keys for the dashboard JSON - same order as STAGE_LABELS/kpi_data_list
+# (Retained -> Referred -> New Intermediaries -> Presentations -> Calls/Meetings),
+# just machine-friendly snake_case instead of the display label.
+STAGE_KEYS = [
+    "retained_clients",
+    "referred_clients",
+    "new_intermediaries",
+    "presentations",
+    "calls_meetings",
+]
+
+
+def build_dashboard_data(kpi_data_list: list, program_breakdown: dict, ref: ReferenceData, today: date) -> dict:
+    """Serialize the same computed KPI data that feeds the Excel workbook into
+    a small, sparse JSON structure for the web dashboard. No new HubSpot
+    calls - this is a pure reshape of numbers already fetched and verified
+    upstream, exactly the numbers `build_workbook` renders into cells.
+
+    Sparse by design (only days with a nonzero count are present), mirroring
+    how the example `gcs-hubspot-funnel-reporting` dashboard keeps its own
+    dataset small - a year of daily counts across 5 stages x 2 BDMs is a few
+    hundred entries at most, not a dense day-by-day grid.
+    """
+    joao_id, rohan_id = ref.owner_ids["joao"], ref.owner_ids["rohan"]
+    owners = {joao_id: OWNER_NAMES["joao"], rohan_id: OWNER_NAMES["rohan"]}
+
+    stages = {}
+    for key, label, counts in zip(STAGE_KEYS, STAGE_LABELS, kpi_data_list):
+        daily: dict = {}
+        for (owner_id, day), count in counts.items():
+            daily.setdefault(str(owner_id), {})[day.isoformat()] = count
+        stage_entry = {"label": label, "daily": daily}
+        if key == "retained_clients":
+            program_daily: dict = {}
+            for (owner_id, program, day), count in program_breakdown.items():
+                owner_bucket = program_daily.setdefault(str(owner_id), {})
+                owner_bucket.setdefault(program, {})[day.isoformat()] = count
+            stage_entry["program_breakdown"] = program_daily
+        stages[key] = stage_entry
+
+    return {
+        "meta": {
+            "year": today.year,
+            "through": today.isoformat(),
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+        "owners": {str(joao_id): owners[joao_id], str(rohan_id): owners[rohan_id]},
+        "owner_order": [str(joao_id), str(rohan_id)],
+        "targets": {
+            "retained_clients": {"per_bdm_annual": RETAINED_CLIENT_ANNUAL_TARGET},
+            "calls_meetings": {"per_bdm_annual": CALLS_MEETINGS_ANNUAL_TARGET},
+        },
+        "stage_order": STAGE_KEYS,
+        "stages": stages,
+    }
+
+
 def main() -> int:
     load_dotenv()
     access_token = os.environ.get("HUBSPOT_ACCESS_TOKEN", "")
@@ -1443,8 +1501,6 @@ def main() -> int:
     kpi_data_list = [retained_clients, referred_clients, new_intermediaries, new_presentations, new_meetings]
 
     print("\nBuilding workbook...")
-    from datetime import datetime, timezone
-
     today = datetime.now(timezone.utc).date()
     wb, sheet_cell_values = build_workbook(kpi_data_list, retained_program_breakdown, ref, today)
     os.makedirs("reports", exist_ok=True)
@@ -1454,6 +1510,13 @@ def main() -> int:
     print("Recalculating formulas...")
     recalculate_workbook(xlsx_path, sheet_cell_values)
     print(f"Wrote {xlsx_path}")
+
+    dashboard_data = build_dashboard_data(kpi_data_list, retained_program_breakdown, ref, today)
+    os.makedirs(os.path.join("dashboard", "data"), exist_ok=True)
+    dashboard_data_path = os.path.join("dashboard", "data", "kpi-data.json")
+    with open(dashboard_data_path, "w", encoding="utf-8") as f:
+        json.dump(dashboard_data, f, separators=(",", ":"))
+    print(f"Wrote {dashboard_data_path}")
 
     print_reconciliation_table(kpi_data_list)
     return 0

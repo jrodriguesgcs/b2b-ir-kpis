@@ -1,0 +1,231 @@
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+const D = __DATA__;
+
+/* ────────── constants ────────── */
+const STAGE_ORDER = D.stage_order;
+const STAGE_COLOR = ['#000957', '#3F8CFF', '#667085', '#9DBEFA', '#C7CCD4'];
+const OWNER_ORDER = D.owner_order;
+const OWNER_COLOR = {[OWNER_ORDER[0]]: '#000957', [OWNER_ORDER[1]]: '#3F8CFF'};
+const OWNER_NAME = D.owners;
+const YEAR = D.meta.year;
+const THROUGH = D.meta.through;
+const CURRENT_MONTH = +THROUGH.slice(5, 7);
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+/* ────────── state ────────── */
+const S = { period: 'ytd', open: new Set() };
+
+/* ────────── data access ────────── */
+const fmt = n => (n == null ? '—' : n.toLocaleString('en-US'));
+function monthPrefix(m) { return `${YEAR}-${String(m).padStart(2, '0')}-`; }
+function periodMatch(day) {
+  return S.period === 'ytd' ? true : day.startsWith(monthPrefix(+S.period.slice(2)));
+}
+/* Sum a stage's daily counts for one owner (or both, if ownerId is null) over the current period. */
+function stageSum(stageKey, ownerId) {
+  const daily = D.stages[stageKey].daily;
+  const ids = ownerId ? [ownerId] : OWNER_ORDER;
+  let t = 0;
+  for (const id of ids) {
+    const days = daily[id] || {};
+    for (const [day, v] of Object.entries(days)) if (periodMatch(day)) t += v;
+  }
+  return t;
+}
+/* Sum a stage across both owners for a specific month, regardless of S.period - used by the trend chart. */
+function stageMonthTotal(stageKey, month) {
+  const daily = D.stages[stageKey].daily;
+  const prefix = monthPrefix(month);
+  let t = 0;
+  for (const id of OWNER_ORDER) {
+    const days = daily[id] || {};
+    for (const [day, v] of Object.entries(days)) if (day.startsWith(prefix)) t += v;
+  }
+  return t;
+}
+/* {program: {ownerId: count}} for the Retained Clients breakdown, current period. */
+function programBreakdown() {
+  const pb = D.stages['retained_clients'].program_breakdown || {};
+  const out = {};
+  for (const ownerId of OWNER_ORDER) {
+    const programs = pb[ownerId] || {};
+    for (const [program, days] of Object.entries(programs)) {
+      let t = 0;
+      for (const [day, v] of Object.entries(days)) if (periodMatch(day)) t += v;
+      if (!t) continue;
+      (out[program] = out[program] || {})[ownerId] = t;
+    }
+  }
+  return out;
+}
+
+/* ────────── period control ────────── */
+function buildPeriodSelect() {
+  const sel = document.getElementById('selPeriod');
+  const opts = [['ytd', `Year to date (${YEAR})`]];
+  for (let m = 1; m <= CURRENT_MONTH; m++) opts.push([`m-${String(m).padStart(2, '0')}`, `${MONTH_NAMES[m - 1]} ${YEAR}`]);
+  sel.innerHTML = opts.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
+  sel.value = S.period;
+  sel.addEventListener('change', () => { S.period = sel.value; render(); });
+}
+
+/* ────────── KPI cards ────────── */
+function renderKpis() {
+  const el = document.getElementById('kpis');
+  el.innerHTML = STAGE_ORDER.map((key, i) => {
+    const stage = D.stages[key];
+    const total = stageSum(key, null);
+    const joao = stageSum(key, OWNER_ORDER[0]);
+    const rohan = stageSum(key, OWNER_ORDER[1]);
+    let targetNote = '';
+    if (key === 'retained_clients') {
+      const perBdm = D.targets.retained_clients.per_bdm_annual;
+      targetNote = `<div class="kpi-sub">Target ${perBdm}/BDM/year</div>`;
+    } else if (key === 'calls_meetings') {
+      const perBdm = D.targets.calls_meetings.per_bdm_annual;
+      const pct = perBdm ? Math.round((100 * joao) / perBdm) : null;
+      targetNote = `<div class="kpi-sub">${fmt(joao)}/${perBdm} João · ${fmt(rohan)}/${perBdm} Rohan</div>`;
+    }
+    return `<div class="card kpi" style="--stage-color:${STAGE_COLOR[i]}">
+      <div class="text-overline">${stage.label}</div>
+      <div class="kpi-row"><span class="kpi-val">${fmt(total)}</span></div>
+      <div class="kpi-sub">João ${fmt(joao)} · Rohan ${fmt(rohan)}</div>
+      ${targetNote}
+    </div>`;
+  }).join('');
+}
+
+/* ────────── stage-by-BDM bars ────────── */
+function renderStageBars() {
+  document.getElementById('sbKey').innerHTML = OWNER_ORDER.map(id =>
+    `<span class="sb-key-item"><i style="background:${OWNER_COLOR[id]}"></i>${OWNER_NAME[id]}</span>`).join('');
+  const totals = STAGE_ORDER.map(key => stageSum(key, null));
+  const max = Math.max(1, ...totals);
+  document.getElementById('stageBars').innerHTML = STAGE_ORDER.map((key, i) => {
+    const stage = D.stages[key];
+    const joao = stageSum(key, OWNER_ORDER[0]);
+    const rohan = stageSum(key, OWNER_ORDER[1]);
+    const total = joao + rohan;
+    const widthPct = Math.max(4, (100 * total) / max);
+    const joaoShare = total ? (100 * joao) / total : 0;
+    const rohanShare = total ? (100 * rohan) / total : 0;
+    return `<div class="sb-row">
+      <div class="sb-label">${stage.label}</div>
+      <div class="sb-track" style="width:${widthPct}%">
+        ${joao ? `<div class="sb-seg" style="width:${joaoShare}%;background:${OWNER_COLOR[OWNER_ORDER[0]]}"><span>${fmt(joao)}</span></div>` : ''}
+        ${rohan ? `<div class="sb-seg" style="width:${rohanShare}%;background:${OWNER_COLOR[OWNER_ORDER[1]]}"><span>${fmt(rohan)}</span></div>` : ''}
+      </div>
+      <div class="sb-total"><b>${fmt(total)}</b> total</div>
+    </div>`;
+  }).join('');
+}
+
+/* ────────── table ────────── */
+function renderTable() {
+  document.getElementById('thJoao').textContent = OWNER_NAME[OWNER_ORDER[0]];
+  document.getElementById('thRohan').textContent = OWNER_NAME[OWNER_ORDER[1]];
+  const tbody = document.querySelector('#stageTable tbody');
+  const tfoot = document.querySelector('#stageTable tfoot');
+  let grandJoao = 0, grandRohan = 0;
+  const rows = STAGE_ORDER.map(key => {
+    const stage = D.stages[key];
+    const joao = stageSum(key, OWNER_ORDER[0]);
+    const rohan = stageSum(key, OWNER_ORDER[1]);
+    grandJoao += joao; grandRohan += rohan;
+    const isRetained = key === 'retained_clients';
+    const rowHtml = `<tr class="${isRetained ? 'parent' : ''}" data-key="${key}">
+      <td>${isRetained ? '<span class="exp">+</span>' : ''}${stage.label}</td>
+      <td>${fmt(joao)}</td><td>${fmt(rohan)}</td><td><b>${fmt(joao + rohan)}</b></td>
+    </tr>`;
+    if (!isRetained) return rowHtml;
+    const pb = programBreakdown();
+    const childRows = Object.entries(pb)
+      .sort((a, b) => ((b[1][OWNER_ORDER[0]] || 0) + (b[1][OWNER_ORDER[1]] || 0)) -
+                      ((a[1][OWNER_ORDER[0]] || 0) + (a[1][OWNER_ORDER[1]] || 0)))
+      .map(([program, byOwner]) => {
+        const j = byOwner[OWNER_ORDER[0]] || 0, r = byOwner[OWNER_ORDER[1]] || 0;
+        return `<tr class="lvl1" data-parent="${key}" hidden><td>${program}</td><td>${fmt(j)}</td><td>${fmt(r)}</td><td>${fmt(j + r)}</td></tr>`;
+      }).join('');
+    return rowHtml + childRows;
+  }).join('');
+  tbody.innerHTML = rows;
+  tfoot.innerHTML = `<tr><td>Grand Total</td><td>${fmt(grandJoao)}</td><td>${fmt(grandRohan)}</td><td>${fmt(grandJoao + grandRohan)}</td></tr>`;
+
+  tbody.querySelectorAll('tr.parent').forEach(tr => {
+    tr.addEventListener('click', () => {
+      const key = tr.dataset.key;
+      const opening = !tr.classList.contains('open');
+      tr.classList.toggle('open', opening);
+      tr.querySelector('.exp').textContent = opening ? '−' : '+';
+      tbody.querySelectorAll(`tr[data-parent="${key}"]`).forEach(child => { child.hidden = !opening; });
+    });
+  });
+}
+
+/* ────────── trend chart ────────── */
+let trendChart = null;
+function renderTrend() {
+  const months = Array.from({ length: CURRENT_MONTH }, (_, i) => i + 1);
+  const datasets = STAGE_ORDER.map((key, i) => ({
+    label: D.stages[key].label,
+    data: months.map(m => stageMonthTotal(key, m)),
+    borderColor: STAGE_COLOR[i],
+    backgroundColor: STAGE_COLOR[i],
+    tension: .3, pointRadius: 3, borderWidth: 2, fill: false,
+  }));
+  const ctx = document.getElementById('trendChart').getContext('2d');
+  if (trendChart) trendChart.destroy();
+  trendChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: months.map(m => MONTH_NAMES[m - 1]), datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
+    },
+  });
+  document.getElementById('trendLegend').innerHTML = STAGE_ORDER.map((key, i) =>
+    `<button aria-pressed="true" data-i="${i}"><span class="key" style="background:${STAGE_COLOR[i]}"></span>${D.stages[key].label}</button>`).join('');
+  document.querySelectorAll('#trendLegend button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const i = +btn.dataset.i;
+      const meta = trendChart.getDatasetMeta(i);
+      meta.hidden = meta.hidden === null ? !trendChart.data.datasets[i].hidden : !meta.hidden;
+      btn.setAttribute('aria-pressed', String(!meta.hidden));
+      trendChart.update();
+    });
+  });
+}
+
+/* ────────── header / footer text ────────── */
+function renderChrome() {
+  document.getElementById('badgeDate').textContent = THROUGH;
+  document.getElementById('footMeta').innerHTML = `Data through <strong>${THROUGH}</strong>`;
+  document.getElementById('targetRetained').textContent = D.targets.retained_clients.per_bdm_annual;
+  document.getElementById('targetCalls').textContent = D.targets.calls_meetings.per_bdm_annual;
+  const sel = document.getElementById('selPeriod');
+  const label = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : '—';
+  document.getElementById('periodBig').textContent = label;
+  document.getElementById('periodMeta').textContent =
+    S.period === 'ytd' ? `1 Jan – ${THROUGH}` : `Calendar month · ${YEAR}`;
+  document.getElementById('headSub').textContent =
+    'Retained, Referred, New Intermediaries, Presentations and Calls/Meetings, split by BDM.';
+  document.getElementById('funnelSub').textContent =
+    S.period === 'ytd' ? `Year-to-date totals through ${THROUGH}` : 'Selected month';
+}
+
+/* ────────── build ────────── */
+function render() {
+  renderChrome();
+  renderKpis();
+  renderStageBars();
+  renderTable();
+  renderTrend();
+}
+
+buildPeriodSelect();
+render();
+</script>
+</body>
+</html>

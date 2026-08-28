@@ -7,3 +7,13 @@ __pycache__/
 .venv/
 venv/
 
+# Dashboard build output. Locally this is just a throwaway build folder
+# (rebuild any time with dashboard/build_dashboard.py + build_locked.py) -
+# nothing here should be committed with a locally-typed test password.
+# The daily dashboard-data.yml workflow force-adds outputs/vercel/index.html
+# specifically (git add -f) when it commits the real, secret-locked build -
+# same reasoning as reports/reports.xlsx being tracked, since pushing it is
+# what triggers Vercel's Git-integration deploy.
+outputs/
+dashboard/.vercel/
+

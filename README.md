@@ -212,3 +212,66 @@ should change.
 
 Actions tab → "Weekly B2B IR KPI Report" → Run workflow. Useful for
 testing the secrets/schedule without waiting for Monday.
+
+## Web dashboard
+
+Alongside the Excel workbook, `generate_report.py` also writes
+`dashboard/data/kpi-data.json` - the same computed numbers, reshaped for a
+live web dashboard published on Vercel. This is a completely separate,
+additive delivery channel: it doesn't touch `reports/reports.xlsx` or the
+weekly email in any way.
+
+The dashboard follows the same pattern as the sibling
+`gcs-hubspot-funnel-reporting` project: no framework, no server. A small
+Python build step inlines the JSON dataset and the GCS logos into three
+HTML templates (`dashboard/template_head.html`, `template_body.html`,
+`template_js.html`), producing one self-contained `outputs/index.html`.
+A second step wraps that file in a client-side, AES-256-GCM password lock
+screen (`outputs/vercel/index.html`) - the actual access control, since
+Vercel's own deployment protection doesn't cover a bare `*.vercel.app`
+alias.
+
+### Building it locally
+
+```bash
+python generate_report.py                                    # writes dashboard/data/kpi-data.json
+python3 dashboard/build_dashboard.py                          # -> outputs/index.html
+python3 dashboard/build_locked.py --password 'your-password'  # -> outputs/vercel/index.html
+```
+
+Open `outputs/vercel/index.html` directly in a browser to preview the
+lock screen and, once unlocked, the dashboard itself - no server needed.
+
+### Automation and deployment
+
+`.github/workflows/dashboard-data.yml` runs the whole thing daily
+(06:00 UTC, plus `workflow_dispatch` for a manual run), commits the
+refreshed `dashboard/data/kpi-data.json` and the newly-locked
+`outputs/vercel/index.html` back to the repo, and stops there - it does
+**not** deploy directly. Instead, connect this repository to a Vercel
+project once (Vercel dashboard → Add New Project → import this repo,
+framework preset "Other", no build command, output directory
+`outputs/vercel`): Vercel's native Git integration then deploys
+automatically on every push to `main`, since the push itself is what
+lands a new `outputs/vercel/index.html` in the repo.
+
+Required repository secret in addition to the ones above:
+
+| Secret | Purpose |
+|---|---|
+| `DASHBOARD_PASSWORD` | The password the lock screen decrypts with - share this with whoever needs dashboard access, rotate by changing the secret (next daily run re-locks with it) |
+
+### What's on the dashboard
+
+- **KPI cards** for all 5 stages (Retained/Referred/New Intermediaries/
+  Presentations/Calls-Meetings), split by BDM, for the selected period
+  (Year to Date or any individual month)
+- **Funnel by BDM**: a stacked bar per stage showing each BDM's share
+- **Trend**: a monthly line chart across the year, one line per stage
+- **Stage performance table**: BDM columns + Grand Total, with
+  **Retained Clients** expandable into its Country/Program of Interest
+  breakdown - the same dimension as the Excel workbook's row drill-down
+- Both annual per-BDM targets (Retained Clients, Calls/Meetings)
+
+Numbers refresh once a day; for the full Month/Week/Day drill-down with
+live formulas, the Excel workbook remains the source of record.

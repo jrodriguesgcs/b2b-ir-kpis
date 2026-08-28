@@ -1,0 +1,72 @@
+name: Refresh B2B IR KPI Dashboard
+
+on:
+  schedule:
+    # 06:00 UTC, daily - ahead of weekly-report.yml's Monday run and early
+    # enough to be fresh before the workday in Europe/Lisbon. Independent of
+    # that workflow: this one never touches reports/reports.xlsx or email.
+    - cron: '0 6 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  refresh-dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch KPI data from HubSpot
+        env:
+          HUBSPOT_ACCESS_TOKEN: ${{ secrets.HUBSPOT_ACCESS_TOKEN }}
+        run: |
+          # Runs the full pipeline (same as weekly-report.yml) - this writes
+          # both reports/reports.xlsx and dashboard/data/kpi-data.json, but
+          # this workflow only ever commits the latter.
+          python generate_report.py
+
+      - name: Build the dashboard
+        run: |
+          python3 dashboard/build_dashboard.py
+          python3 dashboard/build_locked.py --password "${{ secrets.DASHBOARD_PASSWORD }}"
+
+      - name: Commit updated dashboard data + build
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dashboard/data/kpi-data.json
+          # outputs/ is gitignored (a throwaway local build folder that would
+          # otherwise carry a locally-typed test password) - force-add just
+          # the one file Vercel serves, built here with the real secret.
+          git add -f outputs/vercel/index.html
+          git diff --staged --quiet || git commit -m "Refresh B2B IR KPI dashboard [skip ci]"
+          git push
+
+      - name: Email failure notification
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          from: ${{ secrets.MAIL_FROM }}
+          to: jrodrigues@globalcitizensolutions.com
+          subject: "FAILED: B2B IR KPI Dashboard refresh"
+          body: |
+            The daily B2B IR KPI dashboard refresh failed. The live dashboard
+            was not updated with today's data.
+
+            Check the Actions log for details:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
