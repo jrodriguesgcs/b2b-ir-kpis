@@ -101,21 +101,43 @@ than you expected:
 
 ## What's in the workbook
 
-- **Year to Date** (primary sheet): **Stage** is the top-level column
-  grouping, in this order: Retained Clients, Referred Clients, New
-  Intermediaries, Presentations, Calls/Meetings. Each Stage's columns
-  drill down Month → Week → Day using Excel's native **column outline
-  grouping** - only the Month-total columns are visible by default;
-  click the **+** control above a Month to reveal its Week-total columns,
-  and click **+** again above a Week to reveal its individual Days. This
-  works in Excel, LibreOffice Calc, and Google Sheets (via File → Import
-  or opening the .xlsx directly) - look for small **+ / −** buttons in
-  the grey bar just above the column headers. Rows are the two BDMs plus
-  a Grand Total row. Every Week/Month total is a real `SUM()` formula
-  over its own Day/Week columns, never a hardcoded number.
-- **KPI Targets**: static reference content (the minimum annual KPI
-  targets and the detailed rationale behind them, reordered to match the
-  Year to Date sheet's Stage order) - no API calls.
+One tab per Stage, in this order, plus a static reference tab:
+**Retained Clients**, **Referred Clients**, **New Intermediaries**,
+**Presentations**, **Calls-Meetings** (Excel doesn't allow `/` in a tab
+name, so this one tab is named without it; every in-sheet label still
+reads "Calls/Meetings"), then **KPI Targets**.
+
+Every Stage tab shares the same layout:
+
+- **Columns**: Month → Week → Day, using Excel's native **column outline
+  grouping** - only the Month-total columns are visible by default; click
+  the **+** control above a Month to reveal its Week-total columns, and
+  click **+** again above a Week to reveal its individual Days. A **YTD
+  Total** column follows the last month, always visible. This works in
+  Excel, LibreOffice Calc, and Google Sheets (via File → Import or opening
+  the .xlsx directly) - look for small **+ / −** buttons in the grey bar
+  just above the column headers.
+- **Rows**: the two BDMs plus a Grand Total row. Every Week/Month/YTD
+  total is a real `SUM()` formula over its own Day/Week/Month cells, never
+  a hardcoded number.
+
+The **Retained Clients** tab additionally has:
+
+- **A row-level drill-down per BDM**: each BDM's row expands (via Excel's
+  row-level **+/−** outline control, to the left of the row numbers) into
+  nested rows broken down by the deal's **Country and Program of
+  Interest**, collapsed by default - the same outline-grouping mechanism
+  as the column axis, just on rows instead. A BDM's own row is itself a
+  `SUM()` of their breakdown rows, not a separately-tracked number.
+- **Two annual target rows** below Grand Total, one per BDM, showing a
+  literal progressive fraction - "1/12" in January, "2/12" in February,
+  and so on through "12/12" in December - against the 12-retained-
+  clients-per-year minimum each BDM is individually held to. This is
+  static display text, not a formula.
+
+**KPI Targets** is static reference content (the minimum annual KPI
+targets and the detailed rationale behind them, ordered to match the
+Stage tab order) - no API calls.
 
 An in-progress month or week is never padded with future placeholder
 columns - it simply has fewer Day columns than a finished one, which is

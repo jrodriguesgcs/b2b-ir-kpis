@@ -3,14 +3,18 @@
 B2B Intermediary-Referral KPI report generator.
 
 Fetches deal, meeting and contact data from HubSpot and writes a styled
-two-sheet Excel workbook to reports/reports.xlsx:
+Excel workbook to reports/reports.xlsx - one tab per Stage (Retained
+Clients, Referred Clients, New Intermediaries, Presentations,
+Calls-Meetings) plus a static "KPI Targets" tab:
 
-  - "Year to Date": five stages as top-level columns (Retained Clients,
-    Referred Clients, New Intermediaries, Presentations, Calls/Meetings),
-    each with a Month > Week > Day column drill-down via Excel's native
-    outline grouping (+/- expand). Rows are the two BDMs (the internal
-    HubSpot property `hubspot_owner_id`; rendered in the workbook as
-    "BDM") plus a Grand Total row.
+  - Each Stage tab has a Month > Week > Day column drill-down via Excel's
+    native outline grouping (+/- expand), a trailing YTD Total column,
+    and rows for the two BDMs (the internal HubSpot property
+    `hubspot_owner_id`; rendered in the workbook as "BDM") plus a Grand
+    Total row.
+  - The Retained Clients tab additionally breaks each BDM's row down by
+    Country and Program of Interest via row-level outline grouping, and
+    carries two annual target rows (12/year per BDM).
   - "KPI Targets": static reference content (no API calls).
 
 Run with:  python generate_report.py
@@ -783,7 +787,8 @@ def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_sourc
     contact_to_deals = client.batch_read_associations("contacts", "deals", customer_ids)
     all_deal_ids = list({d for deals in contact_to_deals.values() for d in deals})
     deal_props = client.batch_read(
-        "deals", all_deal_ids, ["pipeline", "dealstage", ref.proposal_signed_property]
+        "deals", all_deal_ids,
+        ["pipeline", "dealstage", ref.proposal_signed_property, "country_and_program_of_interest"],
     )
     deal_by_id = {d["id"]: d["properties"] for d in deal_props}
 
@@ -816,6 +821,12 @@ def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_sourc
     introducers = _resolve_introducers(client, ref, qualifying_contacts)
 
     counts: dict = {}
+    # {(owner_id, program_label, day): count} - drives the Retained Clients
+    # tab's per-BDM drill-down by Country and Program of Interest (the
+    # deal's own `country_and_program_of_interest` property). Missing/blank
+    # values are bucketed under "Not specified" rather than dropped, so the
+    # breakdown rows still account for every counted client.
+    program_counts: dict = {}
     missing_signed_date = []
     prior_year = []
     future_dated = []
@@ -823,7 +834,8 @@ def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_sourc
         if contact_id not in introducers:
             continue
         _, owner_id = introducers[contact_id]
-        signed_date = deal_by_id.get(deal_id, {}).get(ref.proposal_signed_property)
+        deal_properties = deal_by_id.get(deal_id, {})
+        signed_date = deal_properties.get(ref.proposal_signed_property)
         if not signed_date:
             missing_signed_date.append((contact_id, deal_id))
             continue
@@ -838,6 +850,8 @@ def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_sourc
             future_dated.append((contact_id, deal_id, day.isoformat()))
             continue
         counts[(owner_id, day)] = counts.get((owner_id, day), 0) + 1
+        program = deal_properties.get("country_and_program_of_interest") or "Not specified"
+        program_counts[(owner_id, program, day)] = program_counts.get((owner_id, program, day), 0) + 1
 
     if missing_signed_date:
         print(f"  {len(missing_signed_date)} qualifying deal(s) missing Proposal Signed Date Time "
@@ -851,7 +865,7 @@ def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_sourc
 
     total = sum(counts.values())
     print(f"Retained Clients: {total} (year-to-date; all-time accepted ground truth was 6)")
-    return counts
+    return counts, program_counts
 
 
 # --- Excel assembly -----------------------------------------------------
@@ -910,37 +924,188 @@ def build_calendar_hierarchy(today: date) -> list:
     return months
 
 
-def build_workbook(kpi_data_list: list, ref: ReferenceData, today: date) -> tuple:
-    """Assemble the two-sheet workbook. kpi_data_list is the five stage
-    {(owner_id, day): count} dicts in STAGE_LABELS order. Returns
-    (workbook, {sheet_name: {cell_ref: value}}) - the second is every
-    formula cell's already-known value, used to inject cached formula
-    results if a LibreOffice recalculation pass isn't available."""
-    wb = Workbook()
-    formula_cells = _build_year_to_date_sheet(wb, kpi_data_list, ref, today)
-    _build_kpi_targets_sheet(wb)
-    return wb, {"Year to Date": formula_cells}
+# Tab names must avoid characters Excel forbids in sheet titles (/ \ ? * [ ]).
+# In-sheet text (row 1 headers, etc.) still uses the real STAGE_LABELS text.
+TAB_NAMES = ["Retained Clients", "Referred Clients", "New Intermediaries", "Presentations", "Calls-Meetings"]
+
+RETAINED_CLIENT_ANNUAL_TARGET = 12  # per BDM, per explicit request
 
 
-def _build_year_to_date_sheet(wb: Workbook, kpi_data_list: list, ref: ReferenceData, today: date) -> dict:
-    """Stage (top-level column) > Month > Week > Day, via Excel's native
-    column outline grouping (+/- expand). Month-total columns are always
-    visible (outline level 0); Week-total columns (level 1) and Day
-    columns (level 2) are collapsed by default - expanding a Month
-    reveals its Weeks, expanding a Week reveals its Days. Rows are the
-    two BDMs plus a Grand Total row.
+def _compute_column_layout(calendar: list, start_col: int = 2) -> dict:
+    """Precompute the Day/Week/Month/YTD column layout once (no row data) so
+    every row written against it - BDM totals, Retained's per-program
+    breakdown rows, Grand Total, target rows - shares identical columns.
     """
-    ws = wb.active
-    ws.title = "Year to Date"
-    ws.sheet_properties.outlinePr = Outline(summaryRight=True)
+    col = start_col
+    day_cols = []
+    week_groups = []  # (week_total_col, [day_cols], week_label, month_name)
+    month_groups = []  # (month_total_col, [week_total_cols], month_name, month_index)
+    for month_index, month_name, weeks in calendar:
+        month_week_cols = []
+        for week_label, days in weeks:
+            week_day_cols = []
+            for day in days:
+                day_cols.append((col, day))
+                week_day_cols.append(col)
+                col += 1
+            week_total_col = col
+            week_groups.append((week_total_col, week_day_cols, week_label, month_name))
+            month_week_cols.append(week_total_col)
+            col += 1
+        month_total_col = col
+        month_groups.append((month_total_col, month_week_cols, month_name, month_index))
+        col += 1
+    ytd_col = col
+    return {
+        "day_cols": day_cols,
+        "week_groups": week_groups,
+        "month_groups": month_groups,
+        "ytd_col": ytd_col,
+        "last_col": ytd_col,
+    }
+
+
+def _write_time_headers(ws, layout: dict, stage_label: str, stage_fill, stage_font) -> None:
+    """Row 1: Stage name merged across the whole tab. Row 2: per-column
+    period label (day date / week / month total / YTD total), plus the
+    column outline levels that drive Month -> Week -> Day drill-down."""
+    last_col = layout["last_col"]
+    ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=last_col)
+    ws.cell(row=1, column=2, value=stage_label)
+
+    for col, day in layout["day_cols"]:
+        letter = get_column_letter(col)
+        ws.cell(row=2, column=col, value=day.isoformat())
+        ws.column_dimensions[letter].outline_level = 2
+        ws.column_dimensions[letter].hidden = True
+        ws.column_dimensions[letter].width = 11
+    for week_total_col, _day_cols, week_label, month_name in layout["week_groups"]:
+        letter = get_column_letter(week_total_col)
+        ws.cell(row=2, column=week_total_col, value=f"{week_label} {month_name}")
+        ws.column_dimensions[letter].outline_level = 1
+        ws.column_dimensions[letter].hidden = True
+        # Marks this group's subordinate level (Days) as starting collapsed -
+        # without this, Excel's expand/collapse behaviour at this boundary is
+        # undefined and can inconsistently cascade into the Day level on a
+        # single click.
+        ws.column_dimensions[letter].collapsed = True
+        ws.column_dimensions[letter].width = 13
+    for month_total_col, _week_cols, month_name, _month_index in layout["month_groups"]:
+        letter = get_column_letter(month_total_col)
+        ws.cell(row=2, column=month_total_col, value=f"{month_name} Total")
+        ws.column_dimensions[letter].outline_level = 0
+        # Same reasoning as above, one level up: a Month-total column with no
+        # collapsed flag is what let some months' "+" cascade straight to Day.
+        ws.column_dimensions[letter].collapsed = True
+        ws.column_dimensions[letter].width = 13
+    ytd_letter = get_column_letter(layout["ytd_col"])
+    ws.cell(row=2, column=layout["ytd_col"], value="YTD Total")
+    ws.column_dimensions[ytd_letter].width = 14
+
+    for row in (1, 2):
+        for col in range(2, last_col + 1):
+            cell = ws.cell(row=row, column=col)
+            cell.fill = stage_fill
+            cell.font = stage_font
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = THIN_BORDER
+
+
+def _all_layout_cols(layout: dict) -> list:
+    cols = [c for c, _ in layout["day_cols"]]
+    cols += [w[0] for w in layout["week_groups"]]
+    cols += [m[0] for m in layout["month_groups"]]
+    cols.append(layout["ytd_col"])
+    return cols
+
+
+def _write_data_row(ws, row_idx: int, layout: dict, day_value_fn, font, formula_cells: dict) -> dict:
+    """Write one row of literal day values plus real SUM() formulas for the
+    Week/Month/YTD columns over that same row's own cells. Returns
+    {col: numeric_value} for every column, used both to cache formula
+    results and to let a parent row (BDM total, Grand Total) sum children."""
+    col_values: dict = {}
+    for col, day in layout["day_cols"]:
+        value = day_value_fn(day)
+        ws.cell(row=row_idx, column=col, value=value).font = font
+        col_values[col] = value
+    for week_total_col, day_cols, _wl, _mn in layout["week_groups"]:
+        first, last = get_column_letter(day_cols[0]), get_column_letter(day_cols[-1])
+        total = sum(col_values[c] for c in day_cols)
+        ws.cell(row=row_idx, column=week_total_col, value=f"=SUM({first}{row_idx}:{last}{row_idx})").font = font
+        col_values[week_total_col] = total
+        formula_cells[f"{get_column_letter(week_total_col)}{row_idx}"] = total
+    for month_total_col, week_cols, _mn, _mi in layout["month_groups"]:
+        refs = ",".join(f"{get_column_letter(c)}{row_idx}" for c in week_cols)
+        total = sum(col_values[c] for c in week_cols)
+        ws.cell(row=row_idx, column=month_total_col, value=f"=SUM({refs})").font = font
+        col_values[month_total_col] = total
+        formula_cells[f"{get_column_letter(month_total_col)}{row_idx}"] = total
+    month_cols = [m[0] for m in layout["month_groups"]]
+    refs = ",".join(f"{get_column_letter(c)}{row_idx}" for c in month_cols)
+    ytd_total = sum(col_values[c] for c in month_cols)
+    ws.cell(row=row_idx, column=layout["ytd_col"], value=f"=SUM({refs})" if month_cols else "=SUM()").font = font
+    col_values[layout["ytd_col"]] = ytd_total
+    formula_cells[f"{get_column_letter(layout['ytd_col'])}{row_idx}"] = ytd_total
+    return col_values
+
+
+def _write_sum_row(ws, row_idx: int, layout: dict, child_col_values: list, source_rows: list,
+                    font, formula_cells: dict) -> dict:
+    """Write row_idx as =SUM() of the given sibling rows, per column - used
+    for a BDM total (sum of its own Program-of-Interest breakdown rows) and
+    the Grand Total row (sum of the two BDM rows)."""
+    col_values: dict = {}
+    for col in _all_layout_cols(layout):
+        letter = get_column_letter(col)
+        refs = ",".join(f"{letter}{r}" for r in source_rows)
+        ws.cell(row=row_idx, column=col, value=f"=SUM({refs})").font = font
+        total = sum(cv.get(col, 0) for cv in child_col_values)
+        col_values[col] = total
+        formula_cells[f"{letter}{row_idx}"] = total
+    return col_values
+
+
+def build_workbook(kpi_data_list: list, program_breakdown: dict, ref: ReferenceData, today: date) -> tuple:
+    """Assemble the workbook: one tab per Stage plus the static KPI Targets
+    tab. kpi_data_list is the five stage {(owner_id, day): count} dicts in
+    STAGE_LABELS order. program_breakdown is the Retained Clients stage's
+    {(owner_id, program, day): count}, used only for that tab's drill-down.
+    Returns (workbook, {sheet_name: {cell_ref: value}}) for the LibreOffice-
+    unavailable cached-formula-value fallback."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    sheet_cell_values = {}
+    for stage_index, (stage_label, tab_name, counts) in enumerate(zip(STAGE_LABELS, TAB_NAMES, kpi_data_list)):
+        breakdown = program_breakdown if stage_label == "Retained Clients" else None
+        formula_cells = _build_stage_sheet(
+            wb, tab_name, stage_label, STAGE_FILLS[stage_index], STAGE_FONTS[stage_index],
+            counts, ref, today, program_breakdown=breakdown,
+        )
+        sheet_cell_values[tab_name] = formula_cells
+    _build_kpi_targets_sheet(wb)
+    return wb, sheet_cell_values
+
+
+def _build_stage_sheet(wb: Workbook, sheet_name: str, stage_label: str, stage_fill, stage_font,
+                        counts: dict, ref: ReferenceData, today: date, program_breakdown: dict = None) -> dict:
+    """One Stage's Year-to-Date tab: Month -> Week -> Day column drill-down
+    (Excel outline grouping, +/- expand) with a trailing YTD Total column.
+    Rows are the two BDMs plus a Grand Total row. When program_breakdown is
+    given (Retained Clients only), each BDM's row expands (row-level +/-)
+    into nested rows broken down by Country and Program of Interest, and two
+    annual-target rows (12/year per BDM) are added below Grand Total.
+    """
+    ws = wb.create_sheet(sheet_name)
+    # summaryRight for the column axis (Month/Week/Day, as before);
+    # summaryBelow=False for the row axis, since a BDM's summary row sits
+    # ABOVE its Program-of-Interest breakdown rows, not below them.
+    ws.sheet_properties.outlinePr = Outline(summaryRight=True, summaryBelow=False)
 
     joao_id, rohan_id = ref.owner_ids["joao"], ref.owner_ids["rohan"]
     calendar = build_calendar_hierarchy(today)
+    layout = _compute_column_layout(calendar)
 
-    joao_row, rohan_row, total_row = 3, 4, 5
-    ws.cell(row=joao_row, column=1, value="João Pacheco Gonçalves").font = BODY_FONT
-    ws.cell(row=rohan_row, column=1, value="Rohan Harris").font = BODY_FONT
-    ws.cell(row=total_row, column=1, value="Grand Total").font = Font(name=FONT_BODY, color=BODY_TEXT, bold=True)
     ws.merge_cells("A1:A2")
     ws["A1"] = str(today.year)
     for row in (1, 2):
@@ -951,125 +1116,104 @@ def _build_year_to_date_sheet(wb: Workbook, kpi_data_list: list, ref: ReferenceD
         cell.border = THIN_BORDER
 
     formula_cells: dict = {}
-    col = 2
-    for stage_index, (stage_label, counts) in enumerate(zip(STAGE_LABELS, kpi_data_list)):
-        stage_start_col = col
-        for month_index, month_name, weeks in calendar:
-            month_start_col = col
-            month_day_cols = []
-            for week_label, days in weeks:
-                week_start_col = col
-                for day in days:
-                    day_count = {
-                        joao_row: counts.get((joao_id, day), 0),
-                        rohan_row: counts.get((rohan_id, day), 0),
-                    }
-                    ws.cell(row=2, column=col, value=day.isoformat()).font = MONO_FONT
-                    for row, value in day_count.items():
-                        ws.cell(row=row, column=col, value=value).font = BODY_FONT
-                    ws.cell(row=total_row, column=col, value=f"=SUM({get_column_letter(col)}{joao_row}:"
-                            f"{get_column_letter(col)}{rohan_row})")
-                    formula_cells[f"{get_column_letter(col)}{total_row}"] = day_count[joao_row] + day_count[rohan_row]
-                    ws.column_dimensions[get_column_letter(col)].outline_level = 2
-                    ws.column_dimensions[get_column_letter(col)].hidden = True
-                    ws.column_dimensions[get_column_letter(col)].width = 11
-                    col += 1
-                month_day_cols.append((week_start_col, col - 1))
+    owners = [(joao_id, "João Pacheco Gonçalves"), (rohan_id, "Rohan Harris")]
 
-                week_total_col = col
-                week_col_letter = get_column_letter(week_total_col)
-                first_day_letter, last_day_letter = get_column_letter(week_start_col), get_column_letter(col - 1)
-                ws.cell(row=2, column=week_total_col, value=f"{week_label} {month_name}").font = MONO_FONT
-                for row in (joao_row, rohan_row):
-                    row_letter_formula = f"=SUM({first_day_letter}{row}:{last_day_letter}{row})"
-                    ws.cell(row=row, column=week_total_col, value=row_letter_formula).font = BODY_FONT
-                    formula_cells[f"{week_col_letter}{row}"] = sum(
-                        counts.get((joao_id if row == joao_row else rohan_id, d), 0) for d in days
-                    )
-                ws.cell(row=total_row, column=week_total_col,
-                        value=f"=SUM({week_col_letter}{joao_row}:{week_col_letter}{rohan_row})")
-                formula_cells[f"{week_col_letter}{total_row}"] = sum(
-                    counts.get((owner, d), 0) for owner in (joao_id, rohan_id) for d in days
-                )
-                ws.column_dimensions[week_col_letter].outline_level = 1
-                ws.column_dimensions[week_col_letter].hidden = True
-                # Marks this group's subordinate level (Days) as starting
-                # collapsed - without this, Excel's expand/collapse behaviour
-                # at this boundary is undefined and can inconsistently
-                # cascade into the Day level on a single click.
-                ws.column_dimensions[week_col_letter].collapsed = True
-                ws.column_dimensions[week_col_letter].width = 13
-                col += 1
+    # Union of programs across both owners, so every BDM shows the same set
+    # of breakdown rows (even a 0-count program) for easy comparison.
+    all_programs = []
+    if program_breakdown is not None:
+        seen = set()
+        for (_owner, program, _day) in program_breakdown:
+            if program not in seen:
+                seen.add(program)
+                all_programs.append(program)
+        all_programs.sort()
 
-            month_total_col = col
-            month_col_letter = get_column_letter(month_total_col)
-            all_month_days = [d for _wl, days in weeks for d in days]
-            ws.cell(row=2, column=month_total_col, value=f"{month_name} Total").font = Font(
-                name=FONT_BODY, color=BODY_TEXT, bold=True
+    row_cursor = 3
+    bdm_col_values = {}
+    bdm_row_index = {}
+    for owner_id, owner_name in owners:
+        bdm_row = row_cursor
+        bdm_row_index[owner_id] = bdm_row
+        row_cursor += 1
+
+        if program_breakdown is not None:
+            child_values = []
+            program_rows = []
+            for program in all_programs:
+                p_row = row_cursor
+                ws.cell(row=p_row, column=1, value=f"    {program}").font = BODY_FONT
+
+                def lookup(day, _owner_id=owner_id, _program=program):
+                    return program_breakdown.get((_owner_id, _program, day), 0)
+
+                child_values.append(_write_data_row(ws, p_row, layout, lookup, BODY_FONT, formula_cells))
+                ws.row_dimensions[p_row].outline_level = 1
+                ws.row_dimensions[p_row].hidden = True
+                program_rows.append(p_row)
+                row_cursor += 1
+
+            bold_font = Font(name=FONT_BODY, color=BODY_TEXT, bold=True)
+            ws.cell(row=bdm_row, column=1, value=owner_name).font = bold_font
+            bdm_col_values[owner_id] = _write_sum_row(
+                ws, bdm_row, layout, child_values, program_rows, bold_font, formula_cells
             )
-            # Week-total columns for this month sit one column after each week's
-            # last day column (week_end_col + 1). They are NOT contiguous with
-            # each other (each week's day columns sit between them), so the
-            # month total must reference them as an explicit cell list, not a
-            # column range - a range would double-count the day columns too.
-            week_total_cols = [end + 1 for _start, end in month_day_cols]
-            for row in (joao_row, rohan_row):
-                cell_refs = ",".join(f"{get_column_letter(c)}{row}" for c in week_total_cols)
-                ws.cell(row=row, column=month_total_col, value=f"=SUM({cell_refs})").font = (
-                    Font(name=FONT_BODY, color=BODY_TEXT, bold=True)
-                )
-                formula_cells[f"{month_col_letter}{row}"] = sum(
-                    counts.get((joao_id if row == joao_row else rohan_id, d), 0) for d in all_month_days
-                )
-            ws.cell(row=total_row, column=month_total_col,
-                    value=f"=SUM({month_col_letter}{joao_row}:{month_col_letter}{rohan_row})").font = Font(
-                name=FONT_BODY, color=BODY_TEXT, bold=True
-            )
-            formula_cells[f"{month_col_letter}{total_row}"] = sum(
-                counts.get((owner, d), 0) for owner in (joao_id, rohan_id) for d in all_month_days
-            )
-            ws.column_dimensions[month_col_letter].outline_level = 0
-            # Marks this Stage's Week level as starting collapsed for the
-            # same reason as the Week-total columns above - a Month-total
-            # column with outline_level=0 but no collapsed flag is exactly
-            # what let some months' "+" cascade straight to Day level.
-            ws.column_dimensions[month_col_letter].collapsed = True
-            ws.column_dimensions[month_col_letter].width = 13
-            col += 1
+            ws.row_dimensions[bdm_row].outline_level = 0
+            # This BDM row is the summary for its collapsed Program-of-Interest
+            # rows below it (see the collapsed-flag note in _write_time_headers
+            # - same OOXML mechanism, row axis instead of column axis).
+            ws.row_dimensions[bdm_row].collapsed = True
+        else:
+            ws.cell(row=bdm_row, column=1, value=owner_name).font = BODY_FONT
 
-        stage_end_col = col - 1
-        ws.merge_cells(start_row=1, start_column=stage_start_col, end_row=1, end_column=stage_end_col)
-        ws.cell(row=1, column=stage_start_col, value=stage_label)
+            def lookup(day, _owner_id=owner_id):
+                return counts.get((_owner_id, day), 0)
 
-        # Per-Stage header colour (rows 1-2), for at-a-glance scannability -
-        # GCS design system's documented --chart-1..5 categorical palette.
-        stage_fill, stage_font = STAGE_FILLS[stage_index], STAGE_FONTS[stage_index]
-        for c in range(stage_start_col, stage_end_col + 1):
-            for row in (1, 2):
-                cell = ws.cell(row=row, column=c)
-                cell.fill = stage_fill
-                cell.font = stage_font
-                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                cell.border = THIN_BORDER
+            bdm_col_values[owner_id] = _write_data_row(ws, bdm_row, layout, lookup, BODY_FONT, formula_cells)
 
-    last_col = col - 1
+    total_row = row_cursor
+    row_cursor += 1
+    total_font = Font(name=FONT_BODY, color=BODY_TEXT, bold=True)
+    ws.cell(row=total_row, column=1, value="Grand Total").font = total_font
+    _write_sum_row(
+        ws, total_row, layout,
+        [bdm_col_values[joao_id], bdm_col_values[rohan_id]],
+        [bdm_row_index[joao_id], bdm_row_index[rohan_id]],
+        total_font, formula_cells,
+    )
 
-    # --- Styling pass (data rows + borders; header colours already applied
-    # per Stage above)
-    for c in range(1, last_col + 1):
-        for row in (joao_row, rohan_row):
-            cell = ws.cell(row=row, column=c)
+    target_rows = []
+    if program_breakdown is not None:
+        # Per-rep annual target: 12 retained clients/year each, shown as
+        # literal progressive "n/12" text per elapsed month + YTD - a static
+        # pace marker, not a formula (there's nothing to sum).
+        for owner_id, owner_name in owners:
+            t_row = row_cursor
+            ws.cell(row=t_row, column=1,
+                    value=f"{owner_name} - Target ({RETAINED_CLIENT_ANNUAL_TARGET}/year)").font = MUTED_ITALIC_FONT
+            for month_total_col, _week_cols, _mn, month_index in layout["month_groups"]:
+                ws.cell(row=t_row, column=month_total_col,
+                        value=f"{month_index}/{RETAINED_CLIENT_ANNUAL_TARGET}").font = MUTED_ITALIC_FONT
+            ws.cell(row=t_row, column=layout["ytd_col"],
+                    value=f"{today.month}/{RETAINED_CLIENT_ANNUAL_TARGET}").font = MUTED_ITALIC_FONT
+            target_rows.append(t_row)
+            row_cursor += 1
+
+    last_data_row = row_cursor - 1
+
+    _write_time_headers(ws, layout, stage_label, stage_fill, stage_font)
+
+    for r in range(3, last_data_row + 1):
+        for c in range(1, layout["last_col"] + 1):
+            cell = ws.cell(row=r, column=c)
             cell.border = THIN_BORDER
             if c > 1:
                 cell.alignment = Alignment(horizontal="center")
-        total_cell = ws.cell(row=total_row, column=c)
-        total_cell.border = THIN_BORDER
-        total_cell.fill = GRAND_TOTAL_FILL
-        if c > 1:
-            total_cell.alignment = Alignment(horizontal="center")
+    for c in range(1, layout["last_col"] + 1):
+        ws.cell(row=total_row, column=c).fill = GRAND_TOTAL_FILL
 
     ws.freeze_panes = "B3"
-    ws.column_dimensions["A"].width = 26
+    ws.column_dimensions["A"].width = 30
 
     return formula_cells
 
@@ -1249,7 +1393,7 @@ def main() -> int:
     new_intermediaries = fetch_new_intermediaries(client, ref)
     new_meetings, new_presentations = fetch_meetings(client, ref)
     lead_source_property, referred_clients = fetch_referred_clients(client, ref)
-    retained_clients = fetch_retained_clients(client, ref, lead_source_property)
+    retained_clients, retained_program_breakdown = fetch_retained_clients(client, ref, lead_source_property)
 
     # Order matches STAGE_LABELS: Retained -> Referred -> New Intermediaries
     # -> Presentations -> Calls/Meetings.
@@ -1259,7 +1403,7 @@ def main() -> int:
     from datetime import datetime, timezone
 
     today = datetime.now(timezone.utc).date()
-    wb, sheet_cell_values = build_workbook(kpi_data_list, ref, today)
+    wb, sheet_cell_values = build_workbook(kpi_data_list, retained_program_breakdown, ref, today)
     os.makedirs("reports", exist_ok=True)
     xlsx_path = os.path.join("reports", "reports.xlsx")
     wb.save(xlsx_path)
