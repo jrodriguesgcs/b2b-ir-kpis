@@ -929,17 +929,23 @@ def build_calendar_hierarchy(today: date) -> list:
 TAB_NAMES = ["Retained Clients", "Referred Clients", "New Intermediaries", "Presentations", "Calls-Meetings"]
 
 RETAINED_CLIENT_ANNUAL_TARGET = 12  # per BDM, per explicit request
+CALLS_MEETINGS_ANNUAL_TARGET = 440  # per BDM, per explicit request
 
 
-def _compute_column_layout(calendar: list, start_col: int = 2) -> dict:
+def _compute_column_layout(calendar: list, start_col: int = 2, include_pct_column: bool = False) -> dict:
     """Precompute the Day/Week/Month/YTD column layout once (no row data) so
     every row written against it - BDM totals, Retained's per-program
     breakdown rows, Grand Total, target rows - shares identical columns.
+
+    include_pct_column reserves one extra flat column right after each
+    Month-total column (Calls-Meetings' "% of Target" column) - baked into
+    the layout up front rather than inserted afterward, since openpyxl does
+    not rewrite formula cell references when columns are inserted later.
     """
     col = start_col
     day_cols = []
     week_groups = []  # (week_total_col, [day_cols], week_label, month_name)
-    month_groups = []  # (month_total_col, [week_total_cols], month_name, month_index)
+    month_groups = []  # (month_total_col, [week_total_cols], month_name, month_index, pct_col)
     for month_index, month_name, weeks in calendar:
         month_week_cols = []
         for week_label, days in weeks:
@@ -953,8 +959,12 @@ def _compute_column_layout(calendar: list, start_col: int = 2) -> dict:
             month_week_cols.append(week_total_col)
             col += 1
         month_total_col = col
-        month_groups.append((month_total_col, month_week_cols, month_name, month_index))
         col += 1
+        pct_col = None
+        if include_pct_column:
+            pct_col = col
+            col += 1
+        month_groups.append((month_total_col, month_week_cols, month_name, month_index, pct_col))
     ytd_col = col
     return {
         "day_cols": day_cols,
@@ -990,7 +1000,7 @@ def _write_time_headers(ws, layout: dict, stage_label: str, stage_fill, stage_fo
         # single click.
         ws.column_dimensions[letter].collapsed = True
         ws.column_dimensions[letter].width = 13
-    for month_total_col, _week_cols, month_name, _month_index in layout["month_groups"]:
+    for month_total_col, _week_cols, month_name, _month_index, pct_col in layout["month_groups"]:
         letter = get_column_letter(month_total_col)
         ws.cell(row=2, column=month_total_col, value=f"{month_name} Total")
         ws.column_dimensions[letter].outline_level = 0
@@ -998,6 +1008,11 @@ def _write_time_headers(ws, layout: dict, stage_label: str, stage_fill, stage_fo
         # collapsed flag is what let some months' "+" cascade straight to Day.
         ws.column_dimensions[letter].collapsed = True
         ws.column_dimensions[letter].width = 13
+        if pct_col is not None:
+            pct_letter = get_column_letter(pct_col)
+            ws.cell(row=2, column=pct_col, value="% of Target")
+            ws.column_dimensions[pct_letter].outline_level = 0
+            ws.column_dimensions[pct_letter].width = 12
     ytd_letter = get_column_letter(layout["ytd_col"])
     ws.cell(row=2, column=layout["ytd_col"], value="YTD Total")
     ws.column_dimensions[ytd_letter].width = 14
@@ -1035,7 +1050,7 @@ def _write_data_row(ws, row_idx: int, layout: dict, day_value_fn, font, formula_
         ws.cell(row=row_idx, column=week_total_col, value=f"=SUM({first}{row_idx}:{last}{row_idx})").font = font
         col_values[week_total_col] = total
         formula_cells[f"{get_column_letter(week_total_col)}{row_idx}"] = total
-    for month_total_col, week_cols, _mn, _mi in layout["month_groups"]:
+    for month_total_col, week_cols, _mn, _mi, _pct in layout["month_groups"]:
         refs = ",".join(f"{get_column_letter(c)}{row_idx}" for c in week_cols)
         total = sum(col_values[c] for c in week_cols)
         ws.cell(row=row_idx, column=month_total_col, value=f"=SUM({refs})").font = font
@@ -1066,6 +1081,22 @@ def _write_sum_row(ws, row_idx: int, layout: dict, child_col_values: list, sourc
     return col_values
 
 
+def _write_pct_of_target_row(ws, row_idx: int, layout: dict, target: float, font, formula_cells: dict) -> None:
+    """Fill in each month's "% of Target" column (Calls-Meetings only) as a
+    real formula referencing that same row's own Month-total cell, divided
+    by the annual target - e.g. August's cell reads "=AL3/440"."""
+    for month_total_col, _week_cols, _mn, _mi, pct_col in layout["month_groups"]:
+        if pct_col is None:
+            continue
+        month_letter = get_column_letter(month_total_col)
+        pct_letter = get_column_letter(pct_col)
+        cell = ws.cell(row=row_idx, column=pct_col, value=f"={month_letter}{row_idx}/{target}")
+        cell.font = font
+        cell.number_format = "0.0%"
+        month_value = formula_cells.get(f"{month_letter}{row_idx}", 0)
+        formula_cells[f"{pct_letter}{row_idx}"] = month_value / target if target else 0
+
+
 def build_workbook(kpi_data_list: list, program_breakdown: dict, ref: ReferenceData, today: date) -> tuple:
     """Assemble the workbook: one tab per Stage plus the static KPI Targets
     tab. kpi_data_list is the five stage {(owner_id, day): count} dicts in
@@ -1076,11 +1107,15 @@ def build_workbook(kpi_data_list: list, program_breakdown: dict, ref: ReferenceD
     wb = Workbook()
     wb.remove(wb.active)
     sheet_cell_values = {}
+    joao_id, rohan_id = ref.owner_ids["joao"], ref.owner_ids["rohan"]
     for stage_index, (stage_label, tab_name, counts) in enumerate(zip(STAGE_LABELS, TAB_NAMES, kpi_data_list)):
         breakdown = program_breakdown if stage_label == "Retained Clients" else None
+        pct_of_target = None
+        if stage_label == "Calls/Meetings":
+            pct_of_target = {joao_id: CALLS_MEETINGS_ANNUAL_TARGET, rohan_id: CALLS_MEETINGS_ANNUAL_TARGET}
         formula_cells = _build_stage_sheet(
             wb, tab_name, stage_label, STAGE_FILLS[stage_index], STAGE_FONTS[stage_index],
-            counts, ref, today, program_breakdown=breakdown,
+            counts, ref, today, program_breakdown=breakdown, pct_of_target=pct_of_target,
         )
         sheet_cell_values[tab_name] = formula_cells
     _build_kpi_targets_sheet(wb)
@@ -1088,7 +1123,8 @@ def build_workbook(kpi_data_list: list, program_breakdown: dict, ref: ReferenceD
 
 
 def _build_stage_sheet(wb: Workbook, sheet_name: str, stage_label: str, stage_fill, stage_font,
-                        counts: dict, ref: ReferenceData, today: date, program_breakdown: dict = None) -> dict:
+                        counts: dict, ref: ReferenceData, today: date, program_breakdown: dict = None,
+                        pct_of_target: dict = None) -> dict:
     """One Stage's Year-to-Date tab: Month -> Week -> Day column drill-down
     (Excel outline grouping, +/- expand) with a trailing YTD Total column.
     Rows are the two BDMs plus a Grand Total row. When program_breakdown is
@@ -1104,7 +1140,7 @@ def _build_stage_sheet(wb: Workbook, sheet_name: str, stage_label: str, stage_fi
 
     joao_id, rohan_id = ref.owner_ids["joao"], ref.owner_ids["rohan"]
     calendar = build_calendar_hierarchy(today)
-    layout = _compute_column_layout(calendar)
+    layout = _compute_column_layout(calendar, include_pct_column=pct_of_target is not None)
 
     ws.merge_cells("A1:A2")
     ws["A1"] = str(today.year)
@@ -1171,6 +1207,9 @@ def _build_stage_sheet(wb: Workbook, sheet_name: str, stage_label: str, stage_fi
 
             bdm_col_values[owner_id] = _write_data_row(ws, bdm_row, layout, lookup, BODY_FONT, formula_cells)
 
+        if pct_of_target is not None:
+            _write_pct_of_target_row(ws, bdm_row, layout, pct_of_target[owner_id], BODY_FONT, formula_cells)
+
     total_row = row_cursor
     row_cursor += 1
     total_font = Font(name=FONT_BODY, color=BODY_TEXT, bold=True)
@@ -1181,6 +1220,10 @@ def _build_stage_sheet(wb: Workbook, sheet_name: str, stage_label: str, stage_fi
         [bdm_row_index[joao_id], bdm_row_index[rohan_id]],
         total_font, formula_cells,
     )
+    if pct_of_target is not None:
+        # Grand Total's own target is the sum of both BDMs' individual
+        # targets (880 = 440 + 440), not a separately-specified figure.
+        _write_pct_of_target_row(ws, total_row, layout, sum(pct_of_target.values()), total_font, formula_cells)
 
     target_rows = []
     if program_breakdown is not None:
@@ -1191,7 +1234,7 @@ def _build_stage_sheet(wb: Workbook, sheet_name: str, stage_label: str, stage_fi
             t_row = row_cursor
             ws.cell(row=t_row, column=1,
                     value=f"{owner_name} - Target ({RETAINED_CLIENT_ANNUAL_TARGET}/year)").font = MUTED_ITALIC_FONT
-            for month_total_col, _week_cols, _mn, month_index in layout["month_groups"]:
+            for month_total_col, _week_cols, _mn, month_index, _pct in layout["month_groups"]:
                 ws.cell(row=t_row, column=month_total_col,
                         value=f"{month_index}/{RETAINED_CLIENT_ANNUAL_TARGET}").font = MUTED_ITALIC_FONT
             ws.cell(row=t_row, column=layout["ytd_col"],
@@ -1233,7 +1276,7 @@ def _build_kpi_targets_sheet(wb: Workbook) -> None:
         ("Intermediary-referred clients", "36/year (~3/month)"),
         ("New self-sourced intermediaries", "150/year (~12/month, ~3/week)"),
         ("Presentations", "40/year (~3/month, ~1/week)"),
-        ("Calls / meetings", "460/year (~38/month, ~9/week)"),
+        ("Calls / meetings", "440/year per BDM (~37/month, ~8/week)"),
     ]
     header_row = 3
     for c, header in enumerate(headers, start=1):

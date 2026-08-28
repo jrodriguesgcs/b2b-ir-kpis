@@ -135,6 +135,11 @@ The **Retained Clients** tab additionally has:
   clients-per-year minimum each BDM is individually held to. This is
   static display text, not a formula.
 
+The **Calls-Meetings** tab additionally has a **"% of Target" column**
+right after every Month Total column, a real formula (that month's total
+÷ 440, the annual per-BDM target) - e.g. `=AL3/440`. The Grand Total
+row's version divides by 880 (the sum of both BDMs' individual targets).
+
 **KPI Targets** is static reference content (the minimum annual KPI
 targets and the detailed rationale behind them, ordered to match the
 Stage tab order) - no API calls.
