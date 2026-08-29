@@ -277,6 +277,7 @@ class ReferenceData:
     lifecyclestage_customer_value: str
     owner_ids: dict = field(default_factory=dict)  # {"joao": "123", "rohan": "456"}
     deal_url_base: str = ""  # e.g. "https://app-eu1.hubspot.com/contacts/147203473/record/0-3/"
+    contact_url_base: str = ""  # same, but object type 0-1 (Contacts)
 
 
 def resolve_reference_data(client: HubSpotClient) -> ReferenceData:
@@ -383,6 +384,7 @@ def resolve_reference_data(client: HubSpotClient) -> ReferenceData:
     portal_id = account_info["portalId"]
     ui_domain = account_info["uiDomain"]
     deal_url_base = f"https://{ui_domain}/contacts/{portal_id}/record/0-3/"
+    contact_url_base = f"https://{ui_domain}/contacts/{portal_id}/record/0-1/"
     print(f"  HubSpot portal = {portal_id} ({ui_domain})")
 
     print("=== Step 0 complete ===\n")
@@ -399,6 +401,7 @@ def resolve_reference_data(client: HubSpotClient) -> ReferenceData:
         lifecyclestage_customer_value=customer_value,
         owner_ids=owner_ids,
         deal_url_base=deal_url_base,
+        contact_url_base=contact_url_base,
     )
 
 
@@ -639,7 +642,7 @@ def _partner_referral_contacts(client: HubSpotClient, property_name: str, extra_
     filters.extend(extra_filters or [])
     body = {
         "filterGroups": [{"filters": filters}],
-        "properties": ["createdate", property_name, "lifecyclestage"],
+        "properties": ["createdate", property_name, "lifecyclestage", "firstname", "lastname"],
         "limit": 100,
     }
     return client.search_all("contacts", body)
@@ -751,25 +754,38 @@ def fetch_referred_clients(client: HubSpotClient, ref: ReferenceData):
         print(f"  candidate '{property_name}': {len(referred_contacts)} Partner Referral contacts (YTD)")
         introducers = _resolve_introducers(client, ref, referred_contacts)
         counts: dict = {}
+        # Per-contact records behind those counts, for the dashboard's
+        # click-through-to-HubSpot feature - Referred Clients has no deal
+        # in this logic at all (a referred contact doesn't need a closed
+        # deal to count), so this links to the Contact record instead.
+        contacts: list = []
         for referred in referred_contacts:
             referred_id = referred["id"]
             if referred_id not in introducers:
                 continue
             _, owner_id = introducers[referred_id]
-            created = referred["properties"].get("createdate")
+            props = referred["properties"]
+            created = props.get("createdate")
             if not created:
                 continue
             day = parse_hubspot_datetime(created).date()
             counts[(owner_id, day)] = counts.get((owner_id, day), 0) + 1
+            name = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
+            contacts.append({
+                "id": referred_id,
+                "name": name or f"Contact {referred_id}",
+                "owner": owner_id,
+                "day": day.isoformat(),
+            })
         total = sum(counts.values())
         print(f"  candidate '{property_name}': grand total = {total}")
         if best is None or abs(total - 20) < abs(best[1] - 20):
-            best = (property_name, total, counts)
+            best = (property_name, total, counts, contacts)
 
-    property_name, total, counts = best
+    property_name, total, counts, contacts = best
     print(f"Referred Clients: using '{property_name}', total = {total} (year-to-date; "
           f"all-time accepted ground truth was 20)")
-    return property_name, counts
+    return property_name, counts, contacts
 
 
 def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_source_property: str):
@@ -1462,9 +1478,25 @@ STAGE_KEYS = [
     "calls_meetings",
 ]
 
+# The dashboard's own stage order - deliberately independent of STAGE_KEYS/
+# STAGE_LABELS above (which stay Excel-only, dormant now that the workbook
+# is retired) so reordering one never touches the other.
+DASHBOARD_STAGE_ORDER = [
+    "retained_clients",
+    "referred_clients",
+    "presentations",
+    "calls_meetings",
+    "new_intermediaries",
+]
+
 
 def build_dashboard_data(
-    kpi_data_list: list, program_breakdown: dict, retained_deals: list, ref: ReferenceData, today: date
+    kpi_data_list: list,
+    program_breakdown: dict,
+    retained_deals: list,
+    referred_contacts: list,
+    ref: ReferenceData,
+    today: date,
 ) -> dict:
     """Serialize the same computed KPI data that feeds the Excel workbook into
     a small, sparse JSON structure for the web dashboard. No new HubSpot
@@ -1492,8 +1524,12 @@ def build_dashboard_data(
                 owner_bucket.setdefault(program, {})[day.isoformat()] = count
             stage_entry["program_breakdown"] = program_daily
             # Per-deal records behind those numbers, for the dashboard's
-            # click-through-to-HubSpot feature (Retained Clients only).
+            # click-through-to-HubSpot feature.
             stage_entry["deals"] = retained_deals
+        elif key == "referred_clients":
+            # Referred Clients has no deal in this logic at all - click-
+            # through links to the Contact record instead.
+            stage_entry["contacts"] = referred_contacts
         stages[key] = stage_entry
 
     return {
@@ -1502,6 +1538,7 @@ def build_dashboard_data(
             "through": today.isoformat(),
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "deal_url_base": ref.deal_url_base,
+            "contact_url_base": ref.contact_url_base,
         },
         "owners": {str(joao_id): owners[joao_id], str(rohan_id): owners[rohan_id]},
         "owner_order": [str(joao_id), str(rohan_id)],
@@ -1509,7 +1546,7 @@ def build_dashboard_data(
             "retained_clients": {"per_bdm_annual": RETAINED_CLIENT_ANNUAL_TARGET},
             "calls_meetings": {"per_bdm_annual": CALLS_MEETINGS_ANNUAL_TARGET},
         },
-        "stage_order": STAGE_KEYS,
+        "stage_order": DASHBOARD_STAGE_ORDER,
         "stages": stages,
     }
 
@@ -1522,27 +1559,25 @@ def main() -> int:
 
     new_intermediaries = fetch_new_intermediaries(client, ref)
     new_meetings, new_presentations = fetch_meetings(client, ref)
-    lead_source_property, referred_clients = fetch_referred_clients(client, ref)
+    lead_source_property, referred_clients, referred_contacts = fetch_referred_clients(client, ref)
     retained_clients, retained_program_breakdown, retained_deals = fetch_retained_clients(
         client, ref, lead_source_property
     )
 
     # Order matches STAGE_LABELS: Retained -> Referred -> New Intermediaries
-    # -> Presentations -> Calls/Meetings.
+    # -> Presentations -> Calls/Meetings. (The dashboard uses its own,
+    # independently-ordered DASHBOARD_STAGE_ORDER - see build_dashboard_data.)
     kpi_data_list = [retained_clients, referred_clients, new_intermediaries, new_presentations, new_meetings]
 
-    print("\nBuilding workbook...")
     today = datetime.now(timezone.utc).date()
-    wb, sheet_cell_values = build_workbook(kpi_data_list, retained_program_breakdown, ref, today)
-    os.makedirs("reports", exist_ok=True)
-    xlsx_path = os.path.join("reports", "reports.xlsx")
-    wb.save(xlsx_path)
 
-    print("Recalculating formulas...")
-    recalculate_workbook(xlsx_path, sheet_cell_values)
-    print(f"Wrote {xlsx_path}")
+    # The Excel workbook is retired (the dashboard below is the only
+    # consumer of this data now) - build_workbook()/recalculate_workbook()
+    # stay in this file, unused, in case the workbook ever comes back.
 
-    dashboard_data = build_dashboard_data(kpi_data_list, retained_program_breakdown, retained_deals, ref, today)
+    dashboard_data = build_dashboard_data(
+        kpi_data_list, retained_program_breakdown, retained_deals, referred_contacts, ref, today
+    )
     os.makedirs(os.path.join("dashboard", "data"), exist_ok=True)
     dashboard_data_path = os.path.join("dashboard", "data", "kpi-data.json")
     with open(dashboard_data_path, "w", encoding="utf-8") as f:

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>B2B Intermediary-Referral KPI Dashboard — Global Citizen Solutions</title>
+<title>Institutional Relations KPI Dashboard — Global Citizen Solutions</title>
 <link rel="icon" href="data:image/svg+xml;base64,__FAVICON__">
 <meta name="theme-color" content="#000957">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -101,7 +101,7 @@ a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible{
   border-radius:var(--radius-md);font-size:.8125rem;font-weight:600;color:var(--primary)}
 .modal-close:hover{background:var(--muted-surface)}
 
-/* ── numeric cells that open a deal (Retained Clients only) ─────────── */
+/* ── numeric cells that open a HubSpot record (Retained/Referred only) ─ */
 .num-link{font:inherit;color:inherit;padding:2px 6px;margin:-2px -6px;border-radius:3px}
 .num-link:hover{background:var(--muted-surface);text-decoration:underline}
 
@@ -176,14 +176,6 @@ a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible{
 .sb-key-item{display:flex;align-items:center;gap:8px;font-size:.8125rem;color:var(--muted)}
 .sb-key-item i{width:11px;height:11px;border-radius:3px;flex:none}
 
-/* ── target pills ────────────────────────────────────── */
-.target-row{display:flex;align-items:center;gap:12px;padding:12px 22px;border-top:1px solid var(--border);
-  flex-wrap:wrap}
-.target-row .text-caption{margin-right:auto}
-.target-chip{display:inline-flex;align-items:center;gap:7px;font-size:.75rem;color:var(--muted);
-  background:var(--muted-surface);border-radius:var(--radius-full);padding:5px 12px}
-.target-chip b{color:var(--primary);font-variant-numeric:tabular-nums}
-
 /* ── chart ───────────────────────────────────────────── */
 .chart-box{position:relative;height:320px}
 .legend{display:flex;gap:16px;flex-wrap:wrap;padding:14px 22px 0}
@@ -205,18 +197,9 @@ table.data th:first-child{background:var(--muted-surface);z-index:3}
 table.data tbody tr:hover td{background:var(--muted-surface)}
 table.data tbody tr:hover td:first-child{background:var(--muted-surface)}
 table.data td:first-child{font-weight:600;color:var(--primary)}
-table.data tr.lvl1 td:first-child{font-weight:400;color:var(--foreground);padding-left:38px;font-size:.78125rem}
-table.data tr.lvl1 td{color:var(--muted)}
-table.data tr.lvl2 td:first-child{font-weight:400;color:var(--muted);padding-left:56px;font-size:.75rem}
-table.data tr.lvl2 td{color:var(--muted)}
 table.data tfoot td{font-weight:700;color:var(--primary);border-top:2px solid var(--border-strong);
   border-bottom:none;background:var(--surface)}
 table.data tfoot td:first-child{background:var(--surface)}
-.exp{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
-  margin-right:8px;border-radius:3px;background:var(--muted-surface);color:var(--muted);
-  font-size:.625rem;vertical-align:1px;transition:all .15s}
-tr.open .exp{background:var(--secondary);color:#fff}
-tr.parent td:first-child{cursor:pointer}
 
 /* ── navy footer ─────────────────────────────────────── */
 .foot{background:var(--primary);margin-top:44px}

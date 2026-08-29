@@ -7,7 +7,7 @@
   <div class="wrap topbar-in">
     <div class="topbar-left">
       <span class="topbar-logo" aria-label="Global Citizen Solutions">__LOGO_SECONDARY_WHITE__</span>
-      <span class="topbar-title">B2B Intermediary-Referral KPI Dashboard</span>
+      <span class="topbar-title">Institutional Relations KPI Dashboard</span>
     </div>
     <div class="topbar-right">
       <span class="data-badge"><span class="dot"></span>Data&nbsp;through <strong id="badgeDate" style="color:#fff;font-weight:600">—</strong></span>
@@ -38,8 +38,9 @@
       <li><strong>Retained Clients</strong> only counts deals actually signed within the current year -
         a client referred last year but signed this year counts; one referred and signed both last year
         does not carry over.</li>
-      <li>Numbers refresh once a day from HubSpot. For the full Month/Week/Day drill-down and formulas,
-        see the companion Excel workbook (<code>reports/reports.xlsx</code>).</li>
+      <li>Numbers refresh once a day from HubSpot. Click a <strong>Retained</strong> or
+        <strong>Referred</strong> number anywhere on this page to open the underlying deal or
+        contact record directly in HubSpot.</li>
     </ul></div>
   </details>
 
@@ -74,7 +75,10 @@
     <div class="card-head">
       <div>
         <h3>Trend</h3>
-        <p class="text-caption">Monthly totals across the year, one line per stage.</p>
+        <p class="text-caption" id="trendSub">Monthly totals across the year, one line per stage.</p>
+      </div>
+      <div class="seg" role="group" aria-label="Filter trend by BDM" id="trendBdmSeg">
+        <button type="button" data-bdm="both" aria-pressed="true">Both</button>
       </div>
     </div>
     <div class="legend" id="trendLegend"></div>
@@ -86,23 +90,23 @@
     <div class="card-head">
       <div>
         <h3>Stage performance by BDM</h3>
-        <p class="text-caption">Click <b>Retained Clients</b> to open its Country / Program of Interest breakdown.</p>
+        <p class="text-caption">Click a <b>Retained</b> or <b>Referred</b> number to open the underlying record(s) in HubSpot.</p>
       </div>
     </div>
     <div class="tbl-scroll"><table class="data" id="stageTable">
       <thead><tr>
-        <th scope="col" style="min-width:210px">Stage</th>
-        <th scope="col" id="thJoao">—</th>
-        <th scope="col" id="thRohan">—</th>
+        <th scope="col" style="min-width:190px">BDM</th>
+        <th scope="col">Retained</th>
+        <th scope="col">Retained&nbsp;Target</th>
+        <th scope="col">Referred</th>
+        <th scope="col">Presentations</th>
+        <th scope="col">Calls/Meetings</th>
+        <th scope="col">Calls/Meetings&nbsp;Target</th>
+        <th scope="col">New&nbsp;Intermediaries</th>
         <th scope="col">Total</th>
       </tr></thead>
       <tbody></tbody><tfoot></tfoot>
     </table></div>
-    <div class="target-row">
-      <span class="text-caption">Annual&nbsp;per-BDM targets</span>
-      <span class="target-chip">Retained&nbsp;Clients <b id="targetRetained">—</b>/year</span>
-      <span class="target-chip">Calls/Meetings <b id="targetCalls">—</b>/year</span>
-    </div>
   </section>
 
 </main>
@@ -113,7 +117,7 @@
   <span id="footMeta">—</span>
 </div></footer>
 
-<!-- ══ DEAL MODAL (Retained Clients click-through) ══ -->
+<!-- ══ RECORD MODAL (Retained/Referred click-through) ══ -->
 <div class="modal-backdrop" id="dealModalBackdrop" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dealModalTitle" id="dealModal">
     <h3 id="dealModalTitle">—</h3>
