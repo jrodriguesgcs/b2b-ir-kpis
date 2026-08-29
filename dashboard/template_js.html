@@ -72,6 +72,24 @@ function stageDaysTotal(stageKey, days, ownerId) {
   }
   return t;
 }
+/* Sum a stage's daily counts from Jan 1 through the end of the selected
+   period (today, if YTD; the last day of the selected month, otherwise) -
+   the cumulative-progress-to-date basis for the Target columns and the
+   table's Total column. Distinct from stageSum(), which for a selected
+   month returns only that single month's isolated count. */
+function cumulativeThroughPeriod(stageKey, ownerId) {
+  if (S.period === 'ytd') return stageSum(stageKey, ownerId);
+  const month = +S.period.slice(2);
+  const cutoff = `${YEAR}-${String(month).padStart(2, '0')}-31`; // lexicographic ISO cutoff
+  const daily = D.stages[stageKey].daily;
+  const ids = ownerId ? [ownerId] : OWNER_ORDER;
+  let t = 0;
+  for (const id of ids) {
+    const days = daily[id] || {};
+    for (const [day, v] of Object.entries(days)) if (day <= cutoff) t += v;
+  }
+  return t;
+}
 function daysInMonth(month) { return new Date(YEAR, month, 0).getDate(); }
 /* Partition a month's days into Monday-start weeks, clipped at the month
    boundary (same partitioning philosophy as the Excel workbook's own
@@ -120,11 +138,35 @@ function onNumLinkClick(btn) {
   if (owner) parts.push(OWNER_NAME[owner]);
   openRecordModal(records, urlBase, parts.join(' · '));
 }
-function openRecordModal(records, urlBase, title) {
+/* The combined (both-BDM) total for Retained/Referred - one matching
+   record opens directly, same as a per-BDM click; 2+ opens the modal
+   grouped under a heading per BDM instead of one flat list. */
+function onTotalClick(stageKey) {
+  const { kind, records: joaoRecords } = recordsFor(stageKey, OWNER_ORDER[0], null);
+  const { records: rohanRecords } = recordsFor(stageKey, OWNER_ORDER[1], null);
+  const all = joaoRecords.concat(rohanRecords);
+  if (!all.length) return;
+  const urlBase = kind === 'deal' ? D.meta.deal_url_base : D.meta.contact_url_base;
+  if (all.length === 1) {
+    window.open(urlBase + all[0].id, '_blank', 'noopener');
+    return;
+  }
+  const groups = [
+    { ownerName: OWNER_NAME[OWNER_ORDER[0]], records: joaoRecords },
+    { ownerName: OWNER_NAME[OWNER_ORDER[1]], records: rohanRecords },
+  ].filter(g => g.records.length);
+  openRecordModal(all, urlBase, D.stages[stageKey].label, groups);
+}
+/* `groups`, when given, renders a BDM sub-heading per group instead of
+   one flat list - used by onTotalClick(); per-BDM/per-program clicks
+   (onNumLinkClick) keep the flat list. */
+function openRecordModal(records, urlBase, title, groups) {
   document.getElementById('dealModalTitle').textContent = title;
   document.getElementById('dealModalSub').textContent = `${records.length} - click one to open it in HubSpot`;
-  document.getElementById('dealModalList').innerHTML = records.map(r =>
-    `<li><a href="${urlBase}${r.id}" target="_blank" rel="noopener">${escapeHtml(r.name)}${r.program ? ' · ' + escapeHtml(r.program) : ''}</a></li>`).join('');
+  const itemHtml = r => `<li><a href="${urlBase}${r.id}" target="_blank" rel="noopener">${escapeHtml(r.name)}${r.program ? ' · ' + escapeHtml(r.program) : ''}</a></li>`;
+  document.getElementById('dealModalList').innerHTML = groups
+    ? groups.map(g => `<li class="modal-group-heading">${escapeHtml(g.ownerName)}</li>${g.records.map(itemHtml).join('')}`).join('')
+    : records.map(itemHtml).join('');
   lastFocusedEl = document.activeElement;
   document.getElementById('dealModalBackdrop').hidden = false;
   document.getElementById('dealModalClose').focus();
@@ -182,20 +224,27 @@ function renderKpis() {
     const clickable = key === 'retained_clients' || key === 'referred_clients';
     const joaoText = clickable ? clickableCell(key, joao, OWNER_ORDER[0]) : fmt(joao);
     const rohanText = clickable ? clickableCell(key, rohan, OWNER_ORDER[1]) : fmt(rohan);
-    let targetNote = '';
-    if (key === 'retained_clients') {
-      targetNote = `<div class="kpi-sub">Target ${RETAINED_TARGET}/BDM/year</div>`;
-    } else if (key === 'calls_meetings') {
-      targetNote = `<div class="kpi-sub">${fmt(joao)}/${CALLS_TARGET} (${pct(joao, CALLS_TARGET)}%)&nbsp;João · ${fmt(rohan)}/${CALLS_TARGET} (${pct(rohan, CALLS_TARGET)}%)&nbsp;Rohan</div>`;
+    const totalText = clickable && total
+      ? `<span class="kpi-val"><button class="num-link" type="button" data-total-stage="${key}">${fmt(total)}</button></span>`
+      : `<span class="kpi-val">${fmt(total)}</span>`;
+    let subLine, targetNote = '';
+    if (key === 'calls_meetings') {
+      subLine = `${fmt(joao)}/${CALLS_TARGET} (${pct(joao, CALLS_TARGET)}%)&nbsp;João · ${fmt(rohan)}/${CALLS_TARGET} (${pct(rohan, CALLS_TARGET)}%)&nbsp;Rohan`;
+      targetNote = `<div class="kpi-sub">Target ${CALLS_TARGET}/BDM/year</div>`;
+    } else {
+      subLine = `João ${joaoText} · Rohan ${rohanText}`;
+      if (key === 'retained_clients') targetNote = `<div class="kpi-sub">Target ${RETAINED_TARGET}/BDM/year</div>`;
     }
     return `<div class="card kpi" style="--stage-color:${STAGE_COLOR_BY_KEY[key]}">
       <div class="text-overline">${stage.label}</div>
-      <div class="kpi-row"><span class="kpi-val">${fmt(total)}</span></div>
-      <div class="kpi-sub">João ${joaoText} · Rohan ${rohanText}</div>
+      <div class="kpi-row">${totalText}</div>
+      <div class="kpi-sub">${subLine}</div>
       ${targetNote}
     </div>`;
   }).join('');
-  el.querySelectorAll('.num-link').forEach(bindNumLink);
+  el.querySelectorAll('.num-link[data-stage]').forEach(bindNumLink);
+  el.querySelectorAll('.num-link[data-total-stage]').forEach(btn =>
+    btn.addEventListener('click', () => onTotalClick(btn.dataset.totalStage)));
 }
 
 /* ────────── stage-by-BDM bars ────────── */
@@ -216,16 +265,21 @@ function renderStageBars() {
     const clickable = key === 'retained_clients' || key === 'referred_clients';
     const joaoLabel = clickable ? clickableCell(key, joao, OWNER_ORDER[0]) : fmt(joao);
     const rohanLabel = clickable ? clickableCell(key, rohan, OWNER_ORDER[1]) : fmt(rohan);
+    const totalLabel = clickable && total
+      ? `<b><button class="num-link" type="button" data-total-stage="${key}">${fmt(total)}</button></b>`
+      : `<b>${fmt(total)}</b>`;
     return `<div class="sb-row">
       <div class="sb-label">${stage.label}</div>
       <div class="sb-track" style="width:${widthPct}%">
         ${joao ? `<div class="sb-seg" style="width:${joaoShare}%;background:${OWNER_COLOR[OWNER_ORDER[0]]}"><span>${joaoLabel}</span></div>` : ''}
         ${rohan ? `<div class="sb-seg" style="width:${rohanShare}%;background:${OWNER_COLOR[OWNER_ORDER[1]]}"><span>${rohanLabel}</span></div>` : ''}
       </div>
-      <div class="sb-total"><b>${fmt(total)}</b> total</div>
+      <div class="sb-total">${totalLabel} total</div>
     </div>`;
   }).join('');
-  el.querySelectorAll('.num-link').forEach(bindNumLink);
+  el.querySelectorAll('.num-link[data-stage]').forEach(bindNumLink);
+  el.querySelectorAll('.num-link[data-total-stage]').forEach(btn =>
+    btn.addEventListener('click', () => onTotalClick(btn.dataset.totalStage)));
 }
 
 /* ────────── table: BDM rows x Stage columns ────────── */
@@ -235,19 +289,25 @@ function renderBdmRow(ownerId, isGrandTotal) {
   const presentations = stageSum('presentations', ownerId);
   const calls = stageSum('calls_meetings', ownerId);
   const newInter = stageSum('new_intermediaries', ownerId);
-  const total = retained + referred + presentations + calls + newInter;
-  const retainedTarget = isGrandTotal ? `${CURRENT_MONTH}/${RETAINED_TARGET * 2}` : `${CURRENT_MONTH}/${RETAINED_TARGET}`;
+  // Target columns and the Total column track cumulative progress-to-date
+  // (Jan 1 -> end of the selected period), not the selected month's own
+  // isolated count - see cumulativeThroughPeriod().
+  const retainedCum = cumulativeThroughPeriod('retained_clients', ownerId);
+  const callsCum = cumulativeThroughPeriod('calls_meetings', ownerId);
+  const total = ['retained_clients', 'referred_clients', 'presentations', 'calls_meetings', 'new_intermediaries']
+    .reduce((sum, key) => sum + cumulativeThroughPeriod(key, ownerId), 0);
+  const retainedTargetDenom = isGrandTotal ? RETAINED_TARGET * 2 : RETAINED_TARGET;
   const callsTargetDenom = isGrandTotal ? CALLS_TARGET * 2 : CALLS_TARGET;
   const label = isGrandTotal ? 'Grand Total' : OWNER_NAME[ownerId];
   const cell = v => isGrandTotal ? `<b>${v}</b>` : v;
   return `<tr>
     <td>${label}</td>
     <td>${cell(clickableCell('retained_clients', retained, ownerId))}</td>
-    <td>${cell(retainedTarget)}</td>
+    <td>${cell(`${fmt(retainedCum)}/${retainedTargetDenom}`)}</td>
     <td>${cell(clickableCell('referred_clients', referred, ownerId))}</td>
     <td>${cell(fmt(presentations))}</td>
     <td>${cell(fmt(calls))}</td>
-    <td>${cell(`${fmt(calls)}/${callsTargetDenom} (${pct(calls, callsTargetDenom)}%)`)}</td>
+    <td>${cell(`${fmt(callsCum)}/${callsTargetDenom} (${pct(callsCum, callsTargetDenom)}%)`)}</td>
     <td>${cell(fmt(newInter))}</td>
     <td><b>${fmt(total)}</b></td>
   </tr>`;
