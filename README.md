@@ -168,6 +168,78 @@ Required repository secret in addition to the ones above:
 |---|---|
 | `DASHBOARD_PASSWORD` | The password the lock screen decrypts with - share this with whoever needs dashboard access, rotate by changing the secret (next daily run re-locks with it) |
 
+### How it works: HubSpot → GitHub → Vercel
+
+The end-to-end pipeline, for reference or for replicating this same
+pattern in another project:
+
+```
+HubSpot API
+    │  generate_report.py (HUBSPOT_ACCESS_TOKEN secret)
+    ▼
+dashboard/data/kpi-data.json         ← the one handoff point
+    │  dashboard/build_dashboard.py
+    ▼
+outputs/index.html                   (gitignored, plaintext, local-only)
+    │  dashboard/build_locked.py (DASHBOARD_PASSWORD secret)
+    ▼
+outputs/vercel/index.html            ← force-added, the only file served
+    │  git commit + push to main
+    ▼
+GitHub                                (webhook fires on push)
+    │  Vercel's native Git integration, no build
+    ▼
+Live on Vercel's CDN
+```
+
+**HubSpot → GitHub** (`.github/workflows/dashboard-data.yml`, daily cron
+at 06:00 UTC plus `workflow_dispatch` for a manual run):
+
+1. Checkout, install dependencies.
+2. Run `generate_report.py` with the `HUBSPOT_ACCESS_TOKEN` secret - it
+   fetches from HubSpot and writes `dashboard/data/kpi-data.json`. This
+   JSON file is the **only** handoff point between "fetch the data" and
+   "build the page" - nothing downstream talks to HubSpot directly.
+3. Run `dashboard/build_dashboard.py`, then `dashboard/build_locked.py
+   --password "$DASHBOARD_PASSWORD"` - together these inline the JSON
+   and the GCS logos into one self-contained, password-locked
+   `outputs/vercel/index.html`.
+4. Commit `dashboard/data/kpi-data.json` and `outputs/vercel/index.html`
+   back to `main`. `outputs/` is gitignored (so local test builds don't
+   pollute the repo), but this step force-adds
+   (`git add -f outputs/vercel/index.html`) that one file specifically -
+   it has to be tracked, since landing it in a commit is what triggers
+   the next stage.
+
+**GitHub → Vercel**: no deploy script, no `VERCEL_TOKEN`, no API call at
+all - this relies entirely on **Vercel's native Git integration**,
+configured once, by hand, in the Vercel dashboard (Project Settings):
+
+| Setting | Value |
+|---|---|
+| Framework Preset | Other |
+| Build Command | *(empty)* |
+| Install Command | *(empty)* |
+| Output Directory | `outputs/vercel`, **override toggle switched on** |
+
+The override toggle is the part most likely to get missed - a typed
+Output Directory value is silently ignored if that toggle isn't
+explicitly enabled, and Vercel falls back to serving the repo root
+instead (this produced a real 404 the first time this project was set
+up). With it configured correctly, every push to `main` makes Vercel's
+GitHub webhook fire, it deploys near-instantly (there's nothing to
+build, just static files to serve), and the new content is live on
+Vercel's CDN - typically within a few seconds of the workflow's commit
+landing.
+
+**Adapting this for another project**: the reusable idea is the
+JSON-in-the-middle handoff - decoupling "fetch your data" from "build
+the page" means either half can change independently, and the page-build
+step never needs credentials for whatever you're fetching from. The
+password-lock step (`build_locked.py`) is optional - skip it entirely if
+the other project's data isn't sensitive, or rely on Vercel's own
+deployment protection instead if the plan supports it.
+
 ### What's on the dashboard
 
 Stage order throughout the dashboard: **Retained, Referred,

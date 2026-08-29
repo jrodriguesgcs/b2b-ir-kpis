@@ -31,9 +31,9 @@ jobs:
         env:
           HUBSPOT_ACCESS_TOKEN: ${{ secrets.HUBSPOT_ACCESS_TOKEN }}
         run: |
-          # Runs the full pipeline (same as weekly-report.yml) - this writes
-          # both reports/reports.xlsx and dashboard/data/kpi-data.json, but
-          # this workflow only ever commits the latter.
+          # Fetches from HubSpot and writes dashboard/data/kpi-data.json.
+          # The Excel workbook path (build_workbook()) is dormant - main()
+          # no longer calls it, so this only ever produces the JSON.
           python generate_report.py
 
       - name: Build the dashboard
