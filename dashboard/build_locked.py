@@ -73,10 +73,10 @@ button:disabled{opacity:.6;cursor:wait}
   <h1>Institutional Relations KPI Dashboard</h1>
   <p class="sub">Internal BDM performance dashboard. Commercial data — password required.</p>
   <form id="f">
-    <input type="password" id="pw" placeholder="Password" autofocus autocomplete="current-password">
+    <input type="password" id="pw" placeholder="Password" aria-label="Password" autofocus autocomplete="current-password">
     <button id="go" type="submit">Open</button>
   </form>
-  <div class="err" id="err"></div>
+  <div class="err" id="err" role="alert" aria-live="polite"></div>
   <div class="foot">Global Citizen Solutions &middot; Institutional Relations<br>Data through __THROUGH__</div>
 </div>
 <script>

@@ -89,11 +89,11 @@
   <section class="sec card">
     <div class="card-head">
       <div>
-        <h3>Stage performance by BDM</h3>
+        <h3 id="stageTableHeading">Stage performance by BDM</h3>
         <p class="text-caption">Click a <b>Retained</b> or <b>Referred</b> number to open the underlying record(s) in HubSpot.</p>
       </div>
     </div>
-    <div class="tbl-scroll"><table class="data" id="stageTable">
+    <div class="tbl-scroll"><table class="data" id="stageTable" aria-labelledby="stageTableHeading">
       <thead><tr>
         <th scope="col" style="min-width:190px">BDM</th>
         <th scope="col">Retained</th>
@@ -103,7 +103,6 @@
         <th scope="col">Calls/Meetings</th>
         <th scope="col">Calls/Meetings&nbsp;Target</th>
         <th scope="col">New&nbsp;Intermediaries</th>
-        <th scope="col">Total</th>
       </tr></thead>
       <tbody></tbody><tfoot></tfoot>
     </table></div>
@@ -119,8 +118,8 @@
 
 <!-- ══ RECORD MODAL (Retained/Referred click-through) ══ -->
 <div class="modal-backdrop" id="dealModalBackdrop" hidden>
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dealModalTitle" id="dealModal">
-    <h3 id="dealModalTitle">—</h3>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dealModalTitle" aria-describedby="dealModalSub" id="dealModal">
+    <h3 id="dealModalTitle" tabindex="-1">—</h3>
     <p class="text-caption" id="dealModalSub">—</p>
     <ul class="modal-list" id="dealModalList"></ul>
     <button class="modal-close" id="dealModalClose" type="button">Close</button>

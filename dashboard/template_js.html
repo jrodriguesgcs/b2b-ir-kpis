@@ -119,10 +119,14 @@ function recordsFor(stageKey, ownerId, program) {
   return { kind: null, records: [] };
 }
 /* A clickable cell for Retained/Referred - a real <button> when nonzero
-   (opens the underlying record(s) in HubSpot), plain text otherwise. */
+   (opens the underlying record(s) in HubSpot), plain text otherwise.
+   aria-label carries the context a bare number can't (stage + BDM),
+   since the visible text is just the count. */
 function clickableCell(stageKey, value, ownerId) {
   if (!value) return fmt(0);
-  return `<button class="num-link" type="button" data-stage="${stageKey}" data-owner="${ownerId || ''}">${fmt(value)}</button>`;
+  const who = ownerId ? `, ${OWNER_NAME[ownerId]}` : '';
+  const label = `${fmt(value)} ${D.stages[stageKey].label}${who} - open in HubSpot`;
+  return `<button class="num-link" type="button" data-stage="${stageKey}" data-owner="${ownerId || ''}" aria-label="${escapeHtml(label)}">${fmt(value)}</button>`;
 }
 function onNumLinkClick(btn) {
   const stageKey = btn.dataset.stage;
@@ -169,7 +173,12 @@ function openRecordModal(records, urlBase, title, groups) {
     : records.map(itemHtml).join('');
   lastFocusedEl = document.activeElement;
   document.getElementById('dealModalBackdrop').hidden = false;
-  document.getElementById('dealModalClose').focus();
+  // Focus the title, not the Close button at the bottom of the list -
+  // Close is the last element in the scrollable .modal container, and
+  // focusing it scrolls the container to the bottom by default. The
+  // title is also the conventional initial-focus target for a dialog
+  // with no more specific default action, and reads its name first.
+  document.getElementById('dealModalTitle').focus();
   document.addEventListener('keydown', onModalKeydown);
 }
 function closeRecordModal() {
@@ -177,7 +186,18 @@ function closeRecordModal() {
   document.removeEventListener('keydown', onModalKeydown);
   if (lastFocusedEl) lastFocusedEl.focus();
 }
-function onModalKeydown(e) { if (e.key === 'Escape') closeRecordModal(); }
+function onModalKeydown(e) {
+  if (e.key === 'Escape') { closeRecordModal(); return; }
+  if (e.key !== 'Tab') return;
+  // Basic focus trap: wrap Tab/Shift+Tab within the modal's own
+  // focusable elements (the link list + Close - recomputed every time,
+  // since the list changes on each open).
+  const focusable = Array.from(document.querySelectorAll('#dealModal a, #dealModal button'));
+  if (!focusable.length) return;
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+}
 function initModal() {
   document.getElementById('dealModalClose').addEventListener('click', closeRecordModal);
   document.getElementById('dealModalBackdrop').addEventListener('click', e => {
@@ -225,7 +245,7 @@ function renderKpis() {
     const joaoText = clickable ? clickableCell(key, joao, OWNER_ORDER[0]) : fmt(joao);
     const rohanText = clickable ? clickableCell(key, rohan, OWNER_ORDER[1]) : fmt(rohan);
     const totalText = clickable && total
-      ? `<span class="kpi-val"><button class="num-link" type="button" data-total-stage="${key}">${fmt(total)}</button></span>`
+      ? `<span class="kpi-val"><button class="num-link" type="button" data-total-stage="${key}" aria-label="${escapeHtml(`${fmt(total)} ${stage.label} - open in HubSpot`)}">${fmt(total)}</button></span>`
       : `<span class="kpi-val">${fmt(total)}</span>`;
     let subLine, targetNote = '';
     if (key === 'calls_meetings') {
@@ -266,7 +286,7 @@ function renderStageBars() {
     const joaoLabel = clickable ? clickableCell(key, joao, OWNER_ORDER[0]) : fmt(joao);
     const rohanLabel = clickable ? clickableCell(key, rohan, OWNER_ORDER[1]) : fmt(rohan);
     const totalLabel = clickable && total
-      ? `<b><button class="num-link" type="button" data-total-stage="${key}">${fmt(total)}</button></b>`
+      ? `<b><button class="num-link" type="button" data-total-stage="${key}" aria-label="${escapeHtml(`${fmt(total)} ${stage.label} - open in HubSpot`)}">${fmt(total)}</button></b>`
       : `<b>${fmt(total)}</b>`;
     return `<div class="sb-row">
       <div class="sb-label">${stage.label}</div>
@@ -289,13 +309,11 @@ function renderBdmRow(ownerId, isGrandTotal) {
   const presentations = stageSum('presentations', ownerId);
   const calls = stageSum('calls_meetings', ownerId);
   const newInter = stageSum('new_intermediaries', ownerId);
-  // Target columns and the Total column track cumulative progress-to-date
-  // (Jan 1 -> end of the selected period), not the selected month's own
-  // isolated count - see cumulativeThroughPeriod().
+  // Target columns track cumulative progress-to-date (Jan 1 -> end of
+  // the selected period), not the selected month's own isolated count -
+  // see cumulativeThroughPeriod().
   const retainedCum = cumulativeThroughPeriod('retained_clients', ownerId);
   const callsCum = cumulativeThroughPeriod('calls_meetings', ownerId);
-  const total = ['retained_clients', 'referred_clients', 'presentations', 'calls_meetings', 'new_intermediaries']
-    .reduce((sum, key) => sum + cumulativeThroughPeriod(key, ownerId), 0);
   const retainedTargetDenom = isGrandTotal ? RETAINED_TARGET * 2 : RETAINED_TARGET;
   const callsTargetDenom = isGrandTotal ? CALLS_TARGET * 2 : CALLS_TARGET;
   const label = isGrandTotal ? 'Grand Total' : OWNER_NAME[ownerId];
@@ -309,7 +327,6 @@ function renderBdmRow(ownerId, isGrandTotal) {
     <td>${cell(fmt(calls))}</td>
     <td>${cell(`${fmt(callsCum)}/${callsTargetDenom} (${pct(callsCum, callsTargetDenom)}%)`)}</td>
     <td>${cell(fmt(newInter))}</td>
-    <td><b>${fmt(total)}</b></td>
   </tr>`;
 }
 function renderTable() {
