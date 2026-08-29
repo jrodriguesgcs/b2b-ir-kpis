@@ -276,6 +276,7 @@ class ReferenceData:
     proposal_accepted_stage_ids: list[str]
     lifecyclestage_customer_value: str
     owner_ids: dict = field(default_factory=dict)  # {"joao": "123", "rohan": "456"}
+    deal_url_base: str = ""  # e.g. "https://app-eu1.hubspot.com/contacts/147203473/record/0-3/"
 
 
 def resolve_reference_data(client: HubSpotClient) -> ReferenceData:
@@ -374,6 +375,16 @@ def resolve_reference_data(client: HubSpotClient) -> ReferenceData:
     print(f"  Owner id (João Pacheco Gonçalves) = {owner_ids['joao']}")
     print(f"  Owner id (Rohan Harris)           = {owner_ids['rohan']}")
 
+    # --- Account info (portal id + UI domain), for building HubSpot record
+    # URLs the dashboard can link straight to (e.g. a Retained Clients deal).
+    # No extra scope needed - works with the same private-app/service-key
+    # token used for everything else.
+    account_info = client.get("/account-info/v3/details")
+    portal_id = account_info["portalId"]
+    ui_domain = account_info["uiDomain"]
+    deal_url_base = f"https://{ui_domain}/contacts/{portal_id}/record/0-3/"
+    print(f"  HubSpot portal = {portal_id} ({ui_domain})")
+
     print("=== Step 0 complete ===\n")
 
     return ReferenceData(
@@ -387,6 +398,7 @@ def resolve_reference_data(client: HubSpotClient) -> ReferenceData:
         proposal_accepted_stage_ids=proposal_accepted_stage_ids,
         lifecyclestage_customer_value=customer_value,
         owner_ids=owner_ids,
+        deal_url_base=deal_url_base,
     )
 
 
@@ -789,7 +801,7 @@ def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_sourc
     all_deal_ids = list({d for deals in contact_to_deals.values() for d in deals})
     deal_props = client.batch_read(
         "deals", all_deal_ids,
-        ["pipeline", "dealstage", ref.proposal_signed_property, "country_and_program_of_interest"],
+        ["pipeline", "dealstage", ref.proposal_signed_property, "country_and_program_of_interest", "dealname"],
     )
     deal_by_id = {d["id"]: d["properties"] for d in deal_props}
 
@@ -828,6 +840,10 @@ def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_sourc
     # values are bucketed under "Not specified" rather than dropped, so the
     # breakdown rows still account for every counted client.
     program_counts: dict = {}
+    # One entry per counted deal - the dashboard's click-through-to-HubSpot
+    # feature needs the actual deal IDs/names behind each number, not just
+    # the aggregate counts above (same filtering, just also recorded).
+    deals: list = []
     missing_signed_date = []
     prior_year = []
     future_dated = []
@@ -853,6 +869,13 @@ def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_sourc
         counts[(owner_id, day)] = counts.get((owner_id, day), 0) + 1
         program = deal_properties.get("country_and_program_of_interest") or "Not specified"
         program_counts[(owner_id, program, day)] = program_counts.get((owner_id, program, day), 0) + 1
+        deals.append({
+            "id": deal_id,
+            "name": deal_properties.get("dealname") or f"Deal {deal_id}",
+            "owner": owner_id,
+            "program": program,
+            "day": day.isoformat(),
+        })
 
     if missing_signed_date:
         print(f"  {len(missing_signed_date)} qualifying deal(s) missing Proposal Signed Date Time "
@@ -866,7 +889,7 @@ def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_sourc
 
     total = sum(counts.values())
     print(f"Retained Clients: {total} (year-to-date; all-time accepted ground truth was 6)")
-    return counts, program_counts
+    return counts, program_counts, deals
 
 
 # --- Excel assembly -----------------------------------------------------
@@ -1440,7 +1463,9 @@ STAGE_KEYS = [
 ]
 
 
-def build_dashboard_data(kpi_data_list: list, program_breakdown: dict, ref: ReferenceData, today: date) -> dict:
+def build_dashboard_data(
+    kpi_data_list: list, program_breakdown: dict, retained_deals: list, ref: ReferenceData, today: date
+) -> dict:
     """Serialize the same computed KPI data that feeds the Excel workbook into
     a small, sparse JSON structure for the web dashboard. No new HubSpot
     calls - this is a pure reshape of numbers already fetched and verified
@@ -1466,6 +1491,9 @@ def build_dashboard_data(kpi_data_list: list, program_breakdown: dict, ref: Refe
                 owner_bucket = program_daily.setdefault(str(owner_id), {})
                 owner_bucket.setdefault(program, {})[day.isoformat()] = count
             stage_entry["program_breakdown"] = program_daily
+            # Per-deal records behind those numbers, for the dashboard's
+            # click-through-to-HubSpot feature (Retained Clients only).
+            stage_entry["deals"] = retained_deals
         stages[key] = stage_entry
 
     return {
@@ -1473,6 +1501,7 @@ def build_dashboard_data(kpi_data_list: list, program_breakdown: dict, ref: Refe
             "year": today.year,
             "through": today.isoformat(),
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "deal_url_base": ref.deal_url_base,
         },
         "owners": {str(joao_id): owners[joao_id], str(rohan_id): owners[rohan_id]},
         "owner_order": [str(joao_id), str(rohan_id)],
@@ -1494,7 +1523,9 @@ def main() -> int:
     new_intermediaries = fetch_new_intermediaries(client, ref)
     new_meetings, new_presentations = fetch_meetings(client, ref)
     lead_source_property, referred_clients = fetch_referred_clients(client, ref)
-    retained_clients, retained_program_breakdown = fetch_retained_clients(client, ref, lead_source_property)
+    retained_clients, retained_program_breakdown, retained_deals = fetch_retained_clients(
+        client, ref, lead_source_property
+    )
 
     # Order matches STAGE_LABELS: Retained -> Referred -> New Intermediaries
     # -> Presentations -> Calls/Meetings.
@@ -1511,7 +1542,7 @@ def main() -> int:
     recalculate_workbook(xlsx_path, sheet_cell_values)
     print(f"Wrote {xlsx_path}")
 
-    dashboard_data = build_dashboard_data(kpi_data_list, retained_program_breakdown, ref, today)
+    dashboard_data = build_dashboard_data(kpi_data_list, retained_program_breakdown, retained_deals, ref, today)
     os.makedirs(os.path.join("dashboard", "data"), exist_ok=True)
     dashboard_data_path = os.path.join("dashboard", "data", "kpi-data.json")
     with open(dashboard_data_path, "w", encoding="utf-8") as f:

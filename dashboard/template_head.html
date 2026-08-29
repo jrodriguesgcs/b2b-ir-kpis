@@ -5,8 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>B2B Intermediary-Referral KPI Dashboard — Global Citizen Solutions</title>
 <link rel="icon" href="data:image/svg+xml;base64,__FAVICON__">
+<meta name="theme-color" content="#000957">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
 <link href="https://fonts.googleapis.com/css2?family=Yrsa:wght@400;500;600;700&family=Heebo:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -70,6 +72,42 @@ button{font-family:inherit;cursor:pointer;border:none;background:none}
   background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2.5'><polyline points='6 9 12 15 18 9'/></svg>");
   background-repeat:no-repeat;background-position:right 10px center}
 .sel:focus{outline:2px solid var(--secondary);outline-offset:-1px}
+.sel:focus:not(:focus-visible){outline:none}
+.sel:focus-visible{outline:2px solid var(--secondary);outline-offset:-1px}
+
+/* ── focus states (generic, for every interactive element below) ────── */
+a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible{
+  outline:2px solid var(--secondary);outline-offset:2px;border-radius:2px}
+
+/* ── skip link ────────────────────────────────────────── */
+.skip-link{position:absolute;left:12px;top:-48px;z-index:100;background:var(--surface);
+  color:var(--primary);padding:10px 16px;border-radius:var(--radius-md);font-size:.8125rem;
+  font-weight:600;box-shadow:var(--shadow-md);transition:top .15s}
+.skip-link:focus{top:12px}
+
+/* ── modal ────────────────────────────────────────────── */
+.modal-backdrop{position:fixed;inset:0;background:rgba(11,16,32,.5);z-index:90;
+  display:flex;align-items:center;justify-content:center;padding:24px}
+.modal-backdrop[hidden]{display:none}
+.modal{background:var(--surface);border-radius:var(--radius-lg);box-shadow:var(--shadow-md);
+  max-width:480px;width:100%;max-height:80vh;overflow:auto;padding:24px}
+.modal h3{font-size:1.0625rem;margin-bottom:4px}
+.modal .text-caption{margin-bottom:16px}
+.modal-list{list-style:none;display:flex;flex-direction:column;gap:2px}
+.modal-list a{display:block;padding:10px 12px;border-radius:var(--radius-md);
+  color:var(--primary);font-size:.875rem;font-weight:500;border:1px solid var(--border)}
+.modal-list a:hover{background:var(--muted-surface);text-decoration:none}
+.modal-close{margin-top:18px;padding:8px 16px;border:1px solid var(--border-strong);
+  border-radius:var(--radius-md);font-size:.8125rem;font-weight:600;color:var(--primary)}
+.modal-close:hover{background:var(--muted-surface)}
+
+/* ── numeric cells that open a deal (Retained Clients only) ─────────── */
+.num-link{font:inherit;color:inherit;padding:2px 6px;margin:-2px -6px;border-radius:3px}
+.num-link:hover{background:var(--muted-surface);text-decoration:underline}
+
+@media (prefers-reduced-motion: reduce){
+  .sb-seg,.sb-track{transition:none!important}
+}
 
 /* ── page header ─────────────────────────────────────── */
 .page-head{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;
@@ -169,6 +207,8 @@ table.data tbody tr:hover td:first-child{background:var(--muted-surface)}
 table.data td:first-child{font-weight:600;color:var(--primary)}
 table.data tr.lvl1 td:first-child{font-weight:400;color:var(--foreground);padding-left:38px;font-size:.78125rem}
 table.data tr.lvl1 td{color:var(--muted)}
+table.data tr.lvl2 td:first-child{font-weight:400;color:var(--muted);padding-left:56px;font-size:.75rem}
+table.data tr.lvl2 td{color:var(--muted)}
 table.data tfoot td{font-weight:700;color:var(--primary);border-top:2px solid var(--border-strong);
   border-bottom:none;background:var(--surface)}
 table.data tfoot td:first-child{background:var(--surface)}

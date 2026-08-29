@@ -12,12 +12,21 @@ const YEAR = D.meta.year;
 const THROUGH = D.meta.through;
 const CURRENT_MONTH = +THROUGH.slice(5, 7);
 const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /* ────────── state ────────── */
-const S = { period: 'ytd', open: new Set() };
+function initialPeriodFromUrl() {
+  const p = new URLSearchParams(window.location.search).get('period');
+  if (p === 'ytd') return 'ytd';
+  if (p && /^m-(0[1-9]|1[0-2])$/.test(p) && +p.slice(2) <= CURRENT_MONTH) return p;
+  return 'ytd';
+}
+const S = { period: initialPeriodFromUrl() };
+let lastFocusedEl = null;
 
 /* ────────── data access ────────── */
 const fmt = n => (n == null ? '—' : n.toLocaleString('en-US'));
+const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function monthPrefix(m) { return `${YEAR}-${String(m).padStart(2, '0')}-`; }
 function periodMatch(day) {
   return S.period === 'ytd' ? true : day.startsWith(monthPrefix(+S.period.slice(2)));
@@ -44,30 +53,33 @@ function stageMonthTotal(stageKey, month) {
   }
   return t;
 }
-/* {program: {ownerId: count}} for the Retained Clients breakdown, current period. */
-function programBreakdown() {
-  const pb = D.stages['retained_clients'].program_breakdown || {};
-  const out = {};
-  for (const ownerId of OWNER_ORDER) {
-    const programs = pb[ownerId] || {};
-    for (const [program, days] of Object.entries(programs)) {
-      let t = 0;
-      for (const [day, v] of Object.entries(days)) if (periodMatch(day)) t += v;
-      if (!t) continue;
-      (out[program] = out[program] || {})[ownerId] = t;
-    }
-  }
-  return out;
+/* Sum one owner's one program's daily counts over the current period. */
+function programSum(ownerId, program) {
+  const days = (D.stages.retained_clients.program_breakdown?.[ownerId] || {})[program] || {};
+  let t = 0;
+  for (const [day, v] of Object.entries(days)) if (periodMatch(day)) t += v;
+  return t;
+}
+/* Retained Clients deal records matching the current period + optional owner/program filters -
+   the data behind every clickable number in that section. */
+function matchingDeals(owner, program) {
+  const deals = D.stages.retained_clients.deals || [];
+  return deals.filter(d => periodMatch(d.day) && (!owner || d.owner === owner) && (!program || d.program === program));
 }
 
 /* ────────── period control ────────── */
+function syncUrl() {
+  const url = new URL(window.location.href);
+  url.searchParams.set('period', S.period);
+  history.replaceState(null, '', url);
+}
 function buildPeriodSelect() {
   const sel = document.getElementById('selPeriod');
   const opts = [['ytd', `Year to date (${YEAR})`]];
   for (let m = 1; m <= CURRENT_MONTH; m++) opts.push([`m-${String(m).padStart(2, '0')}`, `${MONTH_NAMES[m - 1]} ${YEAR}`]);
   sel.innerHTML = opts.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
   sel.value = S.period;
-  sel.addEventListener('change', () => { S.period = sel.value; render(); });
+  sel.addEventListener('change', () => { S.period = sel.value; syncUrl(); render(); });
 }
 
 /* ────────── KPI cards ────────── */
@@ -84,8 +96,7 @@ function renderKpis() {
       targetNote = `<div class="kpi-sub">Target ${perBdm}/BDM/year</div>`;
     } else if (key === 'calls_meetings') {
       const perBdm = D.targets.calls_meetings.per_bdm_annual;
-      const pct = perBdm ? Math.round((100 * joao) / perBdm) : null;
-      targetNote = `<div class="kpi-sub">${fmt(joao)}/${perBdm} João · ${fmt(rohan)}/${perBdm} Rohan</div>`;
+      targetNote = `<div class="kpi-sub">${fmt(joao)}/${perBdm}&nbsp;João · ${fmt(rohan)}/${perBdm}&nbsp;Rohan</div>`;
     }
     return `<div class="card kpi" style="--stage-color:${STAGE_COLOR[i]}">
       <div class="text-overline">${stage.label}</div>
@@ -122,6 +133,56 @@ function renderStageBars() {
 }
 
 /* ────────── table ────────── */
+/* A clickable cell: a real <button> when it has a nonzero value (opens the
+   underlying deal(s) in HubSpot - Retained Clients only), otherwise plain text. */
+function dealCell(value, owner, program) {
+  if (!value) return fmt(0);
+  return `<button class="num-link" type="button" data-owner="${owner || ''}" data-program="${program ? escapeHtml(program) : ''}">${fmt(value)}</button>`;
+}
+
+/* Retained Clients renders as a 3-level nested expand (Stage -> BDM -> Program),
+   mirroring the Excel workbook's own row drill-down - every other stage below
+   stays a single plain row. */
+function renderRetainedRows() {
+  const [joaoId, rohanId] = OWNER_ORDER;
+  const joaoTotal = stageSum('retained_clients', joaoId);
+  const rohanTotal = stageSum('retained_clients', rohanId);
+  const grand = joaoTotal + rohanTotal;
+
+  let html = `<tr class="parent" data-own-id="rc-root">
+    <td><button class="exp" type="button" aria-expanded="false">+</button>Retained Clients</td>
+    <td>${dealCell(joaoTotal, joaoId, null)}</td>
+    <td>${dealCell(rohanTotal, rohanId, null)}</td>
+    <td><b>${dealCell(grand, null, null)}</b></td>
+  </tr>`;
+
+  for (const ownerId of OWNER_ORDER) {
+    const ownerTotal = stageSum('retained_clients', ownerId);
+    const ownId = `rc-bdm-${ownerId}`;
+    html += `<tr class="lvl1" data-parent="rc-root" data-own-id="${ownId}" hidden>
+      <td><button class="exp" type="button" aria-expanded="false">+</button>${OWNER_NAME[ownerId]}</td>
+      <td>${ownerId === joaoId ? dealCell(ownerTotal, ownerId, null) : '—'}</td>
+      <td>${ownerId === rohanId ? dealCell(ownerTotal, ownerId, null) : '—'}</td>
+      <td><b>${dealCell(ownerTotal, ownerId, null)}</b></td>
+    </tr>`;
+
+    const pb = D.stages.retained_clients.program_breakdown?.[ownerId] || {};
+    const programRows = Object.keys(pb)
+      .map(program => [program, programSum(ownerId, program)])
+      .filter(([, t]) => t > 0)
+      .sort((a, b) => b[1] - a[1]);
+    for (const [program, t] of programRows) {
+      html += `<tr class="lvl2" data-parent="${ownId}" hidden>
+        <td>${escapeHtml(program)}</td>
+        <td>${ownerId === joaoId ? dealCell(t, ownerId, program) : '—'}</td>
+        <td>${ownerId === rohanId ? dealCell(t, ownerId, program) : '—'}</td>
+        <td><b>${dealCell(t, ownerId, program)}</b></td>
+      </tr>`;
+    }
+  }
+  return html;
+}
+
 function renderTable() {
   document.getElementById('thJoao').textContent = OWNER_NAME[OWNER_ORDER[0]];
   document.getElementById('thRohan').textContent = OWNER_NAME[OWNER_ORDER[1]];
@@ -129,37 +190,89 @@ function renderTable() {
   const tfoot = document.querySelector('#stageTable tfoot');
   let grandJoao = 0, grandRohan = 0;
   const rows = STAGE_ORDER.map(key => {
+    if (key === 'retained_clients') {
+      grandJoao += stageSum(key, OWNER_ORDER[0]);
+      grandRohan += stageSum(key, OWNER_ORDER[1]);
+      return renderRetainedRows();
+    }
     const stage = D.stages[key];
     const joao = stageSum(key, OWNER_ORDER[0]);
     const rohan = stageSum(key, OWNER_ORDER[1]);
     grandJoao += joao; grandRohan += rohan;
-    const isRetained = key === 'retained_clients';
-    const rowHtml = `<tr class="${isRetained ? 'parent' : ''}" data-key="${key}">
-      <td>${isRetained ? '<span class="exp">+</span>' : ''}${stage.label}</td>
-      <td>${fmt(joao)}</td><td>${fmt(rohan)}</td><td><b>${fmt(joao + rohan)}</b></td>
-    </tr>`;
-    if (!isRetained) return rowHtml;
-    const pb = programBreakdown();
-    const childRows = Object.entries(pb)
-      .sort((a, b) => ((b[1][OWNER_ORDER[0]] || 0) + (b[1][OWNER_ORDER[1]] || 0)) -
-                      ((a[1][OWNER_ORDER[0]] || 0) + (a[1][OWNER_ORDER[1]] || 0)))
-      .map(([program, byOwner]) => {
-        const j = byOwner[OWNER_ORDER[0]] || 0, r = byOwner[OWNER_ORDER[1]] || 0;
-        return `<tr class="lvl1" data-parent="${key}" hidden><td>${program}</td><td>${fmt(j)}</td><td>${fmt(r)}</td><td>${fmt(j + r)}</td></tr>`;
-      }).join('');
-    return rowHtml + childRows;
+    return `<tr><td>${stage.label}</td><td>${fmt(joao)}</td><td>${fmt(rohan)}</td><td><b>${fmt(joao + rohan)}</b></td></tr>`;
   }).join('');
   tbody.innerHTML = rows;
   tfoot.innerHTML = `<tr><td>Grand Total</td><td>${fmt(grandJoao)}</td><td>${fmt(grandRohan)}</td><td>${fmt(grandJoao + grandRohan)}</td></tr>`;
+}
 
-  tbody.querySelectorAll('tr.parent').forEach(tr => {
-    tr.addEventListener('click', () => {
-      const key = tr.dataset.key;
-      const opening = !tr.classList.contains('open');
-      tr.classList.toggle('open', opening);
-      tr.querySelector('.exp').textContent = opening ? '−' : '+';
-      tbody.querySelectorAll(`tr[data-parent="${key}"]`).forEach(child => { child.hidden = !opening; });
-    });
+/* Delegated once (not re-bound on every render, since innerHTML swaps stay
+   inside the same <tbody> element): expand/collapse via .exp, deal
+   click-through via .num-link. */
+function setChildrenVisible(ownId, visible) {
+  document.querySelectorAll(`tr[data-parent="${ownId}"]`).forEach(child => {
+    child.hidden = !visible;
+    if (!visible) {
+      const childExp = child.querySelector('.exp');
+      if (childExp) { childExp.setAttribute('aria-expanded', 'false'); childExp.textContent = '+'; }
+      child.classList.remove('open');
+      if (child.dataset.ownId) setChildrenVisible(child.dataset.ownId, false);
+    }
+  });
+}
+function onExpClick(expBtn) {
+  const tr = expBtn.closest('tr');
+  const ownId = tr.dataset.ownId;
+  const opening = expBtn.getAttribute('aria-expanded') !== 'true';
+  expBtn.setAttribute('aria-expanded', String(opening));
+  expBtn.textContent = opening ? '−' : '+';
+  tr.classList.toggle('open', opening);
+  setChildrenVisible(ownId, opening);
+}
+function onNumLinkClick(btn) {
+  const owner = btn.dataset.owner || null;
+  const program = btn.dataset.program || null;
+  const deals = matchingDeals(owner, program);
+  if (!deals.length) return;
+  if (deals.length === 1) {
+    window.open(D.meta.deal_url_base + deals[0].id, '_blank', 'noopener');
+    return;
+  }
+  const parts = ['Retained Clients'];
+  if (owner) parts.push(OWNER_NAME[owner]);
+  if (program) parts.push(program);
+  openDealModal(deals, parts.join(' · '));
+}
+function initTableInteractions() {
+  const tbody = document.querySelector('#stageTable tbody');
+  tbody.addEventListener('click', e => {
+    const expBtn = e.target.closest('.exp');
+    if (expBtn) { onExpClick(expBtn); return; }
+    const numBtn = e.target.closest('.num-link');
+    if (numBtn) { onNumLinkClick(numBtn); }
+  });
+}
+
+/* ────────── deal modal ────────── */
+function openDealModal(deals, title) {
+  document.getElementById('dealModalTitle').textContent = title;
+  document.getElementById('dealModalSub').textContent = `${deals.length} deals - click one to open it in HubSpot`;
+  document.getElementById('dealModalList').innerHTML = deals.map(d =>
+    `<li><a href="${D.meta.deal_url_base}${d.id}" target="_blank" rel="noopener">${escapeHtml(d.name)}</a></li>`).join('');
+  lastFocusedEl = document.activeElement;
+  document.getElementById('dealModalBackdrop').hidden = false;
+  document.getElementById('dealModalClose').focus();
+  document.addEventListener('keydown', onModalKeydown);
+}
+function closeDealModal() {
+  document.getElementById('dealModalBackdrop').hidden = true;
+  document.removeEventListener('keydown', onModalKeydown);
+  if (lastFocusedEl) lastFocusedEl.focus();
+}
+function onModalKeydown(e) { if (e.key === 'Escape') closeDealModal(); }
+function initModal() {
+  document.getElementById('dealModalClose').addEventListener('click', closeDealModal);
+  document.getElementById('dealModalBackdrop').addEventListener('click', e => {
+    if (e.target.id === 'dealModalBackdrop') closeDealModal();
   });
 }
 
@@ -181,6 +294,7 @@ function renderTrend() {
     data: { labels: months.map(m => MONTH_NAMES[m - 1]), datasets },
     options: {
       responsive: true, maintainAspectRatio: false,
+      animation: REDUCED_MOTION ? false : undefined,
       plugins: { legend: { display: false } },
       scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
     },
@@ -201,7 +315,7 @@ function renderTrend() {
 /* ────────── header / footer text ────────── */
 function renderChrome() {
   document.getElementById('badgeDate').textContent = THROUGH;
-  document.getElementById('footMeta').innerHTML = `Data through <strong>${THROUGH}</strong>`;
+  document.getElementById('footMeta').innerHTML = `Data&nbsp;through <strong>${THROUGH}</strong>`;
   document.getElementById('targetRetained').textContent = D.targets.retained_clients.per_bdm_annual;
   document.getElementById('targetCalls').textContent = D.targets.calls_meetings.per_bdm_annual;
   const sel = document.getElementById('selPeriod');
@@ -225,6 +339,9 @@ function render() {
 }
 
 buildPeriodSelect();
+initTableInteractions();
+initModal();
+syncUrl();
 render();
 </script>
 </body>

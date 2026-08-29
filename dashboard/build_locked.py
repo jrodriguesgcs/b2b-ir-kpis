@@ -56,6 +56,9 @@ input{flex:1;padding:12px 14px;border-radius:6px;border:1px solid rgba(255,255,2
   background:rgba(255,255,255,.08);color:#fff;font-size:1rem;font-family:inherit}
 input::placeholder{color:rgba(255,255,255,.45)}
 input:focus{outline:2px solid #3F8CFF;border-color:transparent}
+input:focus:not(:focus-visible){outline:none}
+input:focus-visible{outline:2px solid #3F8CFF;border-color:transparent}
+button:focus-visible{outline:2px solid #fff;outline-offset:2px}
 button{padding:12px 22px;border:none;border-radius:6px;background:#3F8CFF;color:#fff;
   font-weight:600;font-size:.9375rem;font-family:inherit;cursor:pointer}
 button:hover{filter:brightness(1.08)}

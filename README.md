@@ -9,8 +9,8 @@ click-to-expand Month → Week → Day drill-down, plus a static reference
 sheet of annual KPI targets.
 
 Runs automatically every week via GitHub Actions, committing the
-regenerated report back to the repo and emailing it as an attachment -
-see [Automation](#automation-github-actions) below. It also runs fine
+regenerated report back to the repo - see
+[Automation](#automation-github-actions) below. It also runs fine
 standalone from a local checkout for testing or one-off use.
 
 ## Setup
@@ -169,7 +169,7 @@ substitution.
 ## Automation (GitHub Actions)
 
 `.github/workflows/weekly-report.yml` runs the whole pipeline on a
-schedule and emails the result:
+schedule:
 
 - **Schedule**: every Monday, `0 7 * * 1` (07:00 UTC) - plus
   `workflow_dispatch` for an on-demand manual run from the Actions tab.
@@ -178,12 +178,11 @@ schedule and emails the result:
   Mar-late Oct) and lands at 07:00 Lisbon the rest of the year. Adjust the
   cron expression in the workflow file if a different time or day is
   needed.
-- **What it does**: installs dependencies, runs `generate_report.py`,
+- **What it does**: installs dependencies, runs `generate_report.py`, and
   commits the regenerated `reports/reports.xlsx` back to the repository
-  (skipped if nothing changed that week), then emails it as an attachment
-  via SMTP (`dawidd6/action-send-mail`). A separate `if: failure()` step
-  sends a failure notification instead if any earlier step breaks, so a
-  broken run is never silent.
+  (skipped if nothing changed that week). No email delivery - check the
+  Actions tab (or watch the repository) if you want to know a run
+  happened or failed.
 - **No LibreOffice install step**: GitHub-hosted `ubuntu-latest` runners
   don't ship LibreOffice Calc by default, and installing it would add
   real minutes to every run. `generate_report.py`'s cached-value fallback
@@ -197,16 +196,6 @@ Add these under Settings → Secrets and variables → Actions:
 | Secret | Purpose |
 |---|---|
 | `HUBSPOT_ACCESS_TOKEN` | The same Service Key / private app token used locally |
-| `SMTP_SERVER` | SMTP host (e.g. `smtp.office365.com`, `smtp.gmail.com`) |
-| `SMTP_PORT` | SMTP port (e.g. `587`) |
-| `SMTP_USERNAME` | SMTP login |
-| `SMTP_PASSWORD` | SMTP password / app password |
-| `MAIL_FROM` | The "from" address the report is sent from |
-
-The recipient is **not** a secret - it's the `REPORT_RECIPIENT` value near
-the top of `.github/workflows/weekly-report.yml`. Edit it directly (it's
-currently `jrodrigues@globalcitizensolutions.com`) whenever the recipient
-should change.
 
 ### Triggering a manual run
 
@@ -218,8 +207,8 @@ testing the secrets/schedule without waiting for Monday.
 Alongside the Excel workbook, `generate_report.py` also writes
 `dashboard/data/kpi-data.json` - the same computed numbers, reshaped for a
 live web dashboard published on Vercel. This is a completely separate,
-additive delivery channel: it doesn't touch `reports/reports.xlsx` or the
-weekly email in any way.
+additive delivery channel: it doesn't touch `reports/reports.xlsx` in any
+way.
 
 The dashboard follows the same pattern as the sibling
 `gcs-hubspot-funnel-reporting` project: no framework, no server. A small

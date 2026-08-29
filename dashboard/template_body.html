@@ -1,5 +1,7 @@
 <body>
 
+<a class="skip-link" href="#main">Skip to main content</a>
+
 <!-- ══ NAVY TOPBAR ══ -->
 <nav class="topbar">
   <div class="wrap topbar-in">
@@ -8,12 +10,12 @@
       <span class="topbar-title">B2B Intermediary-Referral KPI Dashboard</span>
     </div>
     <div class="topbar-right">
-      <span class="data-badge"><span class="dot"></span>Data through <strong id="badgeDate" style="color:#fff;font-weight:600">—</strong></span>
+      <span class="data-badge"><span class="dot"></span>Data&nbsp;through <strong id="badgeDate" style="color:#fff;font-weight:600">—</strong></span>
     </div>
   </div>
 </nav>
 
-<main class="wrap">
+<main class="wrap" id="main">
 
   <!-- ══ PAGE HEADER ══ -->
   <header class="page-head">
@@ -89,16 +91,16 @@
     </div>
     <div class="tbl-scroll"><table class="data" id="stageTable">
       <thead><tr>
-        <th style="min-width:210px">Stage</th>
-        <th id="thJoao">—</th>
-        <th id="thRohan">—</th>
-        <th>Total</th>
+        <th scope="col" style="min-width:210px">Stage</th>
+        <th scope="col" id="thJoao">—</th>
+        <th scope="col" id="thRohan">—</th>
+        <th scope="col">Total</th>
       </tr></thead>
       <tbody></tbody><tfoot></tfoot>
     </table></div>
     <div class="target-row">
-      <span class="text-caption">Annual per-BDM targets</span>
-      <span class="target-chip">Retained Clients <b id="targetRetained">—</b>/year</span>
+      <span class="text-caption">Annual&nbsp;per-BDM targets</span>
+      <span class="target-chip">Retained&nbsp;Clients <b id="targetRetained">—</b>/year</span>
       <span class="target-chip">Calls/Meetings <b id="targetCalls">—</b>/year</span>
     </div>
   </section>
@@ -110,3 +112,13 @@
   <span>© __YEAR__ <strong>Global Citizen Solutions</strong> · Institutional Relations</span>
   <span id="footMeta">—</span>
 </div></footer>
+
+<!-- ══ DEAL MODAL (Retained Clients click-through) ══ -->
+<div class="modal-backdrop" id="dealModalBackdrop" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dealModalTitle" id="dealModal">
+    <h3 id="dealModalTitle">—</h3>
+    <p class="text-caption" id="dealModalSub">—</p>
+    <ul class="modal-list" id="dealModalList"></ul>
+    <button class="modal-close" id="dealModalClose" type="button">Close</button>
+  </div>
+</div>
