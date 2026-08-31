@@ -36,7 +36,7 @@ LOCK = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>Institutional Relations KPI Dashboard — Global Citizen Solutions</title>
+<title>Key Intermediaries Performance — Global Citizen Solutions</title>
 <link rel="icon" href="data:image/svg+xml;base64,__FAVICON__">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -70,7 +70,7 @@ button:disabled{opacity:.6;cursor:wait}
 <body>
 <div class="box">
   <span class="sym">__SYMBOL__</span>
-  <h1>Institutional Relations KPI Dashboard</h1>
+  <h1>Key Intermediaries Performance</h1>
   <p class="sub">Internal BDM performance dashboard. Commercial data — password required.</p>
   <form id="f">
     <input type="password" id="pw" placeholder="Password" aria-label="Password" autofocus autocomplete="current-password">

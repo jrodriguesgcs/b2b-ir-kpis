@@ -970,6 +970,9 @@ TAB_NAMES = ["Retained Clients", "Referred Clients", "New Intermediaries", "Pres
 
 RETAINED_CLIENT_ANNUAL_TARGET = 12  # per BDM, per explicit request
 CALLS_MEETINGS_ANNUAL_TARGET = 440  # per BDM, per explicit request
+REFERRED_CLIENT_ANNUAL_TARGET = 36  # per BDM, per explicit request
+PRESENTATIONS_ANNUAL_TARGET = 40  # per BDM, per explicit request
+NEW_INTERMEDIARIES_ANNUAL_TARGET = 150  # per BDM, per explicit request
 
 
 def _compute_column_layout(calendar: list, start_col: int = 2, include_pct_column: bool = False) -> dict:
@@ -1545,6 +1548,9 @@ def build_dashboard_data(
         "targets": {
             "retained_clients": {"per_bdm_annual": RETAINED_CLIENT_ANNUAL_TARGET},
             "calls_meetings": {"per_bdm_annual": CALLS_MEETINGS_ANNUAL_TARGET},
+            "referred_clients": {"per_bdm_annual": REFERRED_CLIENT_ANNUAL_TARGET},
+            "presentations": {"per_bdm_annual": PRESENTATIONS_ANNUAL_TARGET},
+            "new_intermediaries": {"per_bdm_annual": NEW_INTERMEDIARIES_ANNUAL_TARGET},
         },
         "stage_order": DASHBOARD_STAGE_ORDER,
         "stages": stages,

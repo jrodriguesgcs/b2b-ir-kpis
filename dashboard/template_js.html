@@ -1,9 +1,9 @@
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script>
 const D = __DATA__;
 
 /* ────────── constants ────────── */
-const STAGE_ORDER = D.stage_order;
+/* Display order for the 5 per-stage ranked boxes. */
+const BOX_ORDER = ['retained_clients', 'referred_clients', 'new_intermediaries', 'presentations', 'calls_meetings'];
 const STAGE_COLOR_BY_KEY = {
   retained_clients: '#000957', referred_clients: '#3F8CFF', presentations: '#667085',
   calls_meetings: '#9DBEFA', new_intermediaries: '#C7CCD4',
@@ -16,8 +16,6 @@ const THROUGH = D.meta.through;
 const CURRENT_MONTH = +THROUGH.slice(5, 7);
 const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-const RETAINED_TARGET = D.targets.retained_clients.per_bdm_annual;
-const CALLS_TARGET = D.targets.calls_meetings.per_bdm_annual;
 
 /* ────────── state ────────── */
 function initialPeriodFromUrl() {
@@ -26,7 +24,7 @@ function initialPeriodFromUrl() {
   if (p && /^m-(0[1-9]|1[0-2])$/.test(p) && +p.slice(2) <= CURRENT_MONTH) return p;
   return 'ytd';
 }
-const S = { period: initialPeriodFromUrl(), trendBdm: 'both' };
+const S = { period: initialPeriodFromUrl() };
 let lastFocusedEl = null;
 
 /* ────────── data access ────────── */
@@ -60,18 +58,6 @@ function stageMonthTotal(stageKey, month, ownerId) {
   }
   return t;
 }
-/* Sum a stage over an explicit set of ISO day strings, for one owner or both. */
-function stageDaysTotal(stageKey, days, ownerId) {
-  const daily = D.stages[stageKey].daily;
-  const ids = ownerId ? [ownerId] : OWNER_ORDER;
-  const daySet = new Set(days);
-  let t = 0;
-  for (const id of ids) {
-    const dayMap = daily[id] || {};
-    for (const [day, v] of Object.entries(dayMap)) if (daySet.has(day)) t += v;
-  }
-  return t;
-}
 /* Sum a stage's daily counts from Jan 1 through the end of the selected
    period (today, if YTD; the last day of the selected month, otherwise) -
    the cumulative-progress-to-date basis for the Target columns and the
@@ -89,21 +75,6 @@ function cumulativeThroughPeriod(stageKey, ownerId) {
     for (const [day, v] of Object.entries(days)) if (day <= cutoff) t += v;
   }
   return t;
-}
-function daysInMonth(month) { return new Date(YEAR, month, 0).getDate(); }
-/* Partition a month's days into Monday-start weeks, clipped at the month
-   boundary (same partitioning philosophy as the Excel workbook's own
-   calendar hierarchy) - used for the Trend chart's weekly view. */
-function weeksOfMonth(month) {
-  const total = daysInMonth(month);
-  const weeks = []; let current = [];
-  for (let d = 1; d <= total; d++) {
-    const iso = `${YEAR}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-    current.push(iso);
-    const dow = new Date(YEAR, month - 1, d).getDay(); // 0 = Sunday
-    if (dow === 0 || d === total) { weeks.push(current); current = []; }
-  }
-  return weeks.map((days, i) => ({ label: `W${i + 1}`, days }));
 }
 
 /* ────────── click-through-to-HubSpot (Retained -> deal, Referred -> contact) ────────── */
@@ -142,35 +113,14 @@ function onNumLinkClick(btn) {
   if (owner) parts.push(OWNER_NAME[owner]);
   openRecordModal(records, urlBase, parts.join(' · '));
 }
-/* The combined (both-BDM) total for Retained/Referred - one matching
-   record opens directly, same as a per-BDM click; 2+ opens the modal
-   grouped under a heading per BDM instead of one flat list. */
-function onTotalClick(stageKey) {
-  const { kind, records: joaoRecords } = recordsFor(stageKey, OWNER_ORDER[0], null);
-  const { records: rohanRecords } = recordsFor(stageKey, OWNER_ORDER[1], null);
-  const all = joaoRecords.concat(rohanRecords);
-  if (!all.length) return;
-  const urlBase = kind === 'deal' ? D.meta.deal_url_base : D.meta.contact_url_base;
-  if (all.length === 1) {
-    window.open(urlBase + all[0].id, '_blank', 'noopener');
-    return;
-  }
-  const groups = [
-    { ownerName: OWNER_NAME[OWNER_ORDER[0]], records: joaoRecords },
-    { ownerName: OWNER_NAME[OWNER_ORDER[1]], records: rohanRecords },
-  ].filter(g => g.records.length);
-  openRecordModal(all, urlBase, D.stages[stageKey].label, groups);
-}
-/* `groups`, when given, renders a BDM sub-heading per group instead of
-   one flat list - used by onTotalClick(); per-BDM/per-program clicks
-   (onNumLinkClick) keep the flat list. */
-function openRecordModal(records, urlBase, title, groups) {
+/* Shared modal-open plumbing (show, set focus, attach the focus-trap/
+   Escape listener) - used by both openRecordModal() (link list) and
+   openFunnelModal() (a BDM's own mini funnel), which only differ in the
+   list markup they build. */
+function showModal(title, subtitle, listHtml) {
   document.getElementById('dealModalTitle').textContent = title;
-  document.getElementById('dealModalSub').textContent = `${records.length} - click one to open it in HubSpot`;
-  const itemHtml = r => `<li><a href="${urlBase}${r.id}" target="_blank" rel="noopener">${escapeHtml(r.name)}${r.program ? ' · ' + escapeHtml(r.program) : ''}</a></li>`;
-  document.getElementById('dealModalList').innerHTML = groups
-    ? groups.map(g => `<li class="modal-group-heading">${escapeHtml(g.ownerName)}</li>${g.records.map(itemHtml).join('')}`).join('')
-    : records.map(itemHtml).join('');
+  document.getElementById('dealModalSub').textContent = subtitle;
+  document.getElementById('dealModalList').innerHTML = listHtml;
   lastFocusedEl = document.activeElement;
   document.getElementById('dealModalBackdrop').hidden = false;
   // Focus the title, not the Close button at the bottom of the list -
@@ -180,6 +130,45 @@ function openRecordModal(records, urlBase, title, groups) {
   // with no more specific default action, and reads its name first.
   document.getElementById('dealModalTitle').focus();
   document.addEventListener('keydown', onModalKeydown);
+}
+function openRecordModal(records, urlBase, title) {
+  const itemHtml = r => `<li><a href="${urlBase}${r.id}" target="_blank" rel="noopener">${escapeHtml(r.name)}${r.program ? ' · ' + escapeHtml(r.program) : ''}</a></li>`;
+  showModal(title, `${records.length} - click one to open it in HubSpot`, records.map(itemHtml).join(''));
+}
+/* A BDM's own mini funnel across all 5 stages for the currently selected
+   period - opened by clicking their name in any stage box. Each row is a
+   bar (width proportional to that stage's cumulative-to-date value, scaled
+   against this BDM's own largest stage) with the label/value/target text
+   below it - BOX_ORDER already runs Retained (smallest, typically) first
+   through Calls/Meetings (largest) last, so rendering top-to-bottom in that
+   order alone gives the narrow-top/big-bottom funnel shape. */
+function openFunnelModal(ownerId) {
+  const isMonth = S.period !== 'ytd';
+  const month = isMonth ? +S.period.slice(2) : null;
+  const cums = BOX_ORDER.map(key => cumulativeThroughPeriod(key, ownerId));
+  const maxCum = Math.max(...cums, 0);
+  const MIN_WIDTH = 8; // percent floor so a near-zero stage's bar stays visible
+  const rows = BOX_ORDER.map((key, i) => {
+    const cum = cums[i];
+    const target = targetToDate(key, ownerId);
+    const width = maxCum ? Math.max(MIN_WIDTH, Math.round((cum / maxCum) * 100)) : MIN_WIDTH;
+    let monthLine = '';
+    if (isMonth) {
+      const monthQty = stageMonthTotal(key, month, ownerId);
+      const mTarget = monthlyTarget(key, ownerId);
+      monthLine = `<span class="funnel-month">This month: ${fmt(monthQty)}/${mTarget} (${pct(monthQty, mTarget)}%)</span>`;
+    }
+    return `<li class="funnel-row">
+      <div class="funnel-track"><div class="funnel-bar" style="width:${width}%;background:${STAGE_COLOR_BY_KEY[key]}"></div></div>
+      <div class="funnel-text">
+        <span class="funnel-label">${escapeHtml(D.stages[key].label)}</span>
+        <span class="funnel-val">${fmt(cum)}/${target} (${pct(cum, target)}%)</span>
+        ${monthLine}
+      </div>
+    </li>`;
+  }).join('');
+  const subtitle = S.period === 'ytd' ? `Year-to-date totals through ${THROUGH}` : 'Selected month, cumulative to date';
+  showModal(OWNER_NAME[ownerId], subtitle, rows);
 }
 function closeRecordModal() {
   document.getElementById('dealModalBackdrop').hidden = true;
@@ -227,214 +216,105 @@ function buildPeriodSelect() {
     });
   });
 }
-function buildTrendBdmToggle() {
-  const seg = document.getElementById('trendBdmSeg');
-  const opts = [['both', 'Both'], [OWNER_ORDER[0], OWNER_NAME[OWNER_ORDER[0]]], [OWNER_ORDER[1], OWNER_NAME[OWNER_ORDER[1]]]];
-  seg.innerHTML = opts.map(([v, l]) =>
-    `<button type="button" data-bdm="${v}" aria-pressed="${v === S.trendBdm}">${l}</button>`).join('');
-  seg.querySelectorAll('button').forEach(btn => {
-    btn.addEventListener('click', () => {
-      S.trendBdm = btn.dataset.bdm;
-      seg.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b === btn)));
-      renderTrend();
-    });
-  });
-}
 
-/* ────────── KPI cards ────────── */
-function renderKpis() {
-  const el = document.getElementById('kpis');
-  el.innerHTML = STAGE_ORDER.map(key => {
-    const stage = D.stages[key];
-    const total = stageSum(key, null);
-    const joao = stageSum(key, OWNER_ORDER[0]);
-    const rohan = stageSum(key, OWNER_ORDER[1]);
-    const clickable = key === 'retained_clients' || key === 'referred_clients';
-    const joaoText = clickable ? clickableCell(key, joao, OWNER_ORDER[0]) : fmt(joao);
-    const rohanText = clickable ? clickableCell(key, rohan, OWNER_ORDER[1]) : fmt(rohan);
-    const totalText = clickable && total
-      ? `<span class="kpi-val"><button class="num-link" type="button" data-total-stage="${key}" aria-label="${escapeHtml(`${fmt(total)} ${stage.label} - open in HubSpot`)}">${fmt(total)}</button></span>`
-      : `<span class="kpi-val">${fmt(total)}</span>`;
-    let subLines, targetNote = '';
-    if (key === 'calls_meetings') {
-      // Target progress is cumulative-to-date (Jan 1 through the end of
-      // the selected period), not that period's own isolated count -
-      // matches the Stage-performance table's Calls/Meetings Target column.
-      const joaoCum = cumulativeThroughPeriod(key, OWNER_ORDER[0]);
-      const rohanCum = cumulativeThroughPeriod(key, OWNER_ORDER[1]);
-      subLines = [
-        `João&nbsp;${fmt(joaoCum)}/${CALLS_TARGET}&nbsp;(${pct(joaoCum, CALLS_TARGET)}%)`,
-        `Rohan&nbsp;${fmt(rohanCum)}/${CALLS_TARGET}&nbsp;(${pct(rohanCum, CALLS_TARGET)}%)`,
-      ];
-      targetNote = `<div class="kpi-sub">Target ${CALLS_TARGET}/BDM/year</div>`;
-    } else {
-      subLines = [`João ${joaoText} · Rohan ${rohanText}`];
-      if (key === 'retained_clients') targetNote = `<div class="kpi-sub">Target ${RETAINED_TARGET}/BDM/year</div>`;
+/* ────────── per-stage ranked boxes ────────── */
+/* Target-to-date denominator: the flat annual per-BDM target, unprorated -
+   doubled for the combined Total row (ownerId null). Paired with the
+   existing cumulative-to-date numerator (cumulativeThroughPeriod()), so the
+   percentage reflects progress made so far against the full year's goal,
+   not a shrunk goal for the elapsed months. */
+function targetToDate(stageKey, ownerId) {
+  return D.targets[stageKey].per_bdm_annual * (ownerId ? 1 : 2);
+}
+/* "This month" secondary line's denominator - one twelfth of the annual
+   target, doubled for the combined Total row. Only shown when a single
+   month (not YTD) is selected. */
+function monthlyTarget(stageKey, ownerId) {
+  return Math.round(D.targets[stageKey].per_bdm_annual * (ownerId ? 1 : 2) / 12);
+}
+/* Rank the two BDMs by a stage's quantity for the selected period,
+   higher first; ties keep OWNER_ORDER's existing order (João before
+   Rohan). */
+function rankedOwners(stageKey) {
+  return OWNER_ORDER
+    .map((id, idx) => ({ id, idx, sum: stageSum(stageKey, id) }))
+    .sort((a, b) => b.sum - a.sum || a.idx - b.idx)
+    .map(o => o.id);
+}
+function renderStageBox(key) {
+  const stage = D.stages[key];
+  const isMonth = S.period !== 'ytd';
+  const month = isMonth ? +S.period.slice(2) : null;
+  const clickable = key === 'retained_clients' || key === 'referred_clients';
+  const headingId = `stageBoxHeading-${key}`;
+  const bodyRow = (ownerId, rank) => {
+    const qty = stageSum(key, ownerId);
+    const cum = cumulativeThroughPeriod(key, ownerId);
+    const target = targetToDate(key, ownerId);
+    const qtyCell = clickable ? clickableCell(key, qty, ownerId) : fmt(qty);
+    const nameCell = rank
+      ? `<span class="rank-badge">${rank}</span><button class="bdm-link" type="button" data-owner="${ownerId}" aria-label="${escapeHtml(`Open ${OWNER_NAME[ownerId]}'s funnel across all stages`)}">${escapeHtml(OWNER_NAME[ownerId])}</button>`
+      : '<b>Total</b>';
+    let monthCell = '';
+    if (isMonth) {
+      const monthQty = stageMonthTotal(key, month, ownerId);
+      const mTarget = monthlyTarget(key, ownerId);
+      const cell = `This month: ${fmt(monthQty)}/${mTarget} (${pct(monthQty, mTarget)}%)`;
+      monthCell = `<td><div class="kpi-sub">${cell}</div></td>`;
     }
-    return `<div class="card kpi" style="--stage-color:${STAGE_COLOR_BY_KEY[key]}">
-      <div class="text-overline">${stage.label}</div>
-      <div class="kpi-row">${totalText}</div>
-      ${subLines.map(s => `<div class="kpi-sub">${s}</div>`).join('')}
-      ${targetNote}
-    </div>`;
-  }).join('');
-  el.querySelectorAll('.num-link[data-stage]').forEach(bindNumLink);
-  el.querySelectorAll('.num-link[data-total-stage]').forEach(btn =>
-    btn.addEventListener('click', () => onTotalClick(btn.dataset.totalStage)));
-}
-
-/* ────────── stage-by-BDM bars ────────── */
-function renderStageBars() {
-  document.getElementById('sbKey').innerHTML = OWNER_ORDER.map(id =>
-    `<span class="sb-key-item"><i style="background:${OWNER_COLOR[id]}"></i>${OWNER_NAME[id]}</span>`).join('');
-  const totals = STAGE_ORDER.map(key => stageSum(key, null));
-  const max = Math.max(1, ...totals);
-  const el = document.getElementById('stageBars');
-  el.innerHTML = STAGE_ORDER.map(key => {
-    const stage = D.stages[key];
-    const joao = stageSum(key, OWNER_ORDER[0]);
-    const rohan = stageSum(key, OWNER_ORDER[1]);
-    const total = joao + rohan;
-    const widthPct = Math.max(4, (100 * total) / max);
-    const joaoShare = total ? (100 * joao) / total : 0;
-    const rohanShare = total ? (100 * rohan) / total : 0;
-    const clickable = key === 'retained_clients' || key === 'referred_clients';
-    const joaoLabel = clickable ? clickableCell(key, joao, OWNER_ORDER[0]) : fmt(joao);
-    const rohanLabel = clickable ? clickableCell(key, rohan, OWNER_ORDER[1]) : fmt(rohan);
-    const totalLabel = clickable && total
-      ? `<b><button class="num-link" type="button" data-total-stage="${key}" aria-label="${escapeHtml(`${fmt(total)} ${stage.label} - open in HubSpot`)}">${fmt(total)}</button></b>`
-      : `<b>${fmt(total)}</b>`;
-    return `<div class="sb-row">
-      <div class="sb-label">${stage.label}</div>
-      <div class="sb-track" style="width:${widthPct}%">
-        ${joao ? `<div class="sb-seg" style="width:${joaoShare}%;background:${OWNER_COLOR[OWNER_ORDER[0]]}"><span>${joaoLabel}</span></div>` : ''}
-        ${rohan ? `<div class="sb-seg" style="width:${rohanShare}%;background:${OWNER_COLOR[OWNER_ORDER[1]]}"><span>${rohanLabel}</span></div>` : ''}
+    return `<tr>
+      <td>${nameCell}</td>
+      <td>${rank ? qtyCell : `<b>${qtyCell}</b>`}</td>
+      <td>${rank ? '' : '<b>'}${fmt(cum)}/${target} (${pct(cum, target)}%)${rank ? '' : '</b>'}</td>
+      ${monthCell}
+    </tr>`;
+  };
+  const ranked = rankedOwners(key);
+  return `<section class="sec card" style="--stage-color:${STAGE_COLOR_BY_KEY[key]}">
+    <div class="card-head">
+      <div>
+        <h3 id="${headingId}">${escapeHtml(stage.label)}</h3>
+        ${clickable ? '<p class="text-caption">Click a BDM\'s name for their full funnel, or their quantity to open it in HubSpot.</p>' : '<p class="text-caption">Click a BDM\'s name for their full funnel across all stages.</p>'}
       </div>
-      <div class="sb-total">${totalLabel} total</div>
-    </div>`;
-  }).join('');
-  el.querySelectorAll('.num-link[data-stage]').forEach(bindNumLink);
-  el.querySelectorAll('.num-link[data-total-stage]').forEach(btn =>
-    btn.addEventListener('click', () => onTotalClick(btn.dataset.totalStage)));
+    </div>
+    <div class="tbl-scroll"><table class="data" aria-labelledby="${headingId}">
+      <thead><tr>
+        <th scope="col" style="text-align:left">BDM</th>
+        <th scope="col">Quantity</th>
+        <th scope="col">Target to date</th>
+        ${isMonth ? '<th scope="col">This month</th>' : ''}
+      </tr></thead>
+      <tbody>${ranked.map((id, i) => bodyRow(id, i + 1)).join('')}</tbody>
+      <tfoot>${bodyRow(null, null)}</tfoot>
+    </table></div>
+  </section>`;
 }
-
-/* ────────── table: BDM rows x Stage columns ────────── */
-function renderBdmRow(ownerId, isGrandTotal) {
-  const retained = stageSum('retained_clients', ownerId);
-  const referred = stageSum('referred_clients', ownerId);
-  const presentations = stageSum('presentations', ownerId);
-  const calls = stageSum('calls_meetings', ownerId);
-  const newInter = stageSum('new_intermediaries', ownerId);
-  // Target columns track cumulative progress-to-date (Jan 1 -> end of
-  // the selected period), not the selected month's own isolated count -
-  // see cumulativeThroughPeriod().
-  const retainedCum = cumulativeThroughPeriod('retained_clients', ownerId);
-  const callsCum = cumulativeThroughPeriod('calls_meetings', ownerId);
-  const retainedTargetDenom = isGrandTotal ? RETAINED_TARGET * 2 : RETAINED_TARGET;
-  const callsTargetDenom = isGrandTotal ? CALLS_TARGET * 2 : CALLS_TARGET;
-  const label = isGrandTotal ? 'Grand Total' : OWNER_NAME[ownerId];
-  const cell = v => isGrandTotal ? `<b>${v}</b>` : v;
-  return `<tr>
-    <td>${label}</td>
-    <td>${cell(clickableCell('retained_clients', retained, ownerId))}</td>
-    <td>${cell(`${fmt(retainedCum)}/${retainedTargetDenom}`)}</td>
-    <td>${cell(clickableCell('referred_clients', referred, ownerId))}</td>
-    <td>${cell(fmt(presentations))}</td>
-    <td>${cell(fmt(calls))}</td>
-    <td>${cell(`${fmt(callsCum)}/${callsTargetDenom} (${pct(callsCum, callsTargetDenom)}%)`)}</td>
-    <td>${cell(fmt(newInter))}</td>
-  </tr>`;
-}
-function renderTable() {
-  const tbody = document.querySelector('#stageTable tbody');
-  const tfoot = document.querySelector('#stageTable tfoot');
-  tbody.innerHTML = OWNER_ORDER.map(id => renderBdmRow(id, false)).join('');
-  tfoot.innerHTML = renderBdmRow(null, true);
-  document.querySelectorAll('#stageTable .num-link').forEach(bindNumLink);
+function renderStageBoxes() {
+  const el = document.getElementById('stageBoxes');
+  el.innerHTML = BOX_ORDER.map(renderStageBox).join('');
+  el.querySelectorAll('.num-link').forEach(bindNumLink);
+  el.querySelectorAll('.bdm-link').forEach(btn =>
+    btn.addEventListener('click', () => openFunnelModal(btn.dataset.owner)));
 }
 function bindNumLink(btn) {
   btn.addEventListener('click', () => onNumLinkClick(btn));
-}
-
-/* ────────── trend chart ────────── */
-let trendChart = null;
-function trendOwner() { return S.trendBdm === 'both' ? null : S.trendBdm; }
-function renderTrend() {
-  const isMonth = S.period !== 'ytd';
-  let labels, datasets;
-  if (isMonth) {
-    const month = +S.period.slice(2);
-    const weeks = weeksOfMonth(month);
-    labels = weeks.map(w => w.label);
-    datasets = STAGE_ORDER.map(key => ({
-      label: D.stages[key].label,
-      data: weeks.map(w => stageDaysTotal(key, w.days, trendOwner())),
-      borderColor: STAGE_COLOR_BY_KEY[key], backgroundColor: STAGE_COLOR_BY_KEY[key],
-      tension: .3, pointRadius: 3, borderWidth: 2, fill: false,
-    }));
-    document.getElementById('trendSub').textContent = `Weekly totals for ${MONTH_NAMES[month - 1]} ${YEAR}, one line per stage.`;
-  } else {
-    const months = Array.from({ length: CURRENT_MONTH }, (_, i) => i + 1);
-    labels = months.map(m => MONTH_NAMES[m - 1]);
-    datasets = STAGE_ORDER.map(key => ({
-      label: D.stages[key].label,
-      data: months.map(m => stageMonthTotal(key, m, trendOwner())),
-      borderColor: STAGE_COLOR_BY_KEY[key], backgroundColor: STAGE_COLOR_BY_KEY[key],
-      tension: .3, pointRadius: 3, borderWidth: 2, fill: false,
-    }));
-    document.getElementById('trendSub').textContent = 'Monthly totals across the year, one line per stage.';
-  }
-  const ctx = document.getElementById('trendChart').getContext('2d');
-  if (trendChart) trendChart.destroy();
-  trendChart = new Chart(ctx, {
-    type: 'line',
-    data: { labels, datasets },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      animation: REDUCED_MOTION ? false : undefined,
-      plugins: { legend: { display: false } },
-      scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
-    },
-  });
-  document.getElementById('trendLegend').innerHTML = STAGE_ORDER.map((key, i) =>
-    `<button aria-pressed="true" data-i="${i}"><span class="key" style="background:${STAGE_COLOR_BY_KEY[key]}"></span>${D.stages[key].label}</button>`).join('');
-  document.querySelectorAll('#trendLegend button').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const i = +btn.dataset.i;
-      const meta = trendChart.getDatasetMeta(i);
-      meta.hidden = meta.hidden === null ? !trendChart.data.datasets[i].hidden : !meta.hidden;
-      btn.setAttribute('aria-pressed', String(!meta.hidden));
-      trendChart.update();
-    });
-  });
 }
 
 /* ────────── header / footer text ────────── */
 function renderChrome() {
   document.getElementById('badgeDate').textContent = THROUGH;
   document.getElementById('footMeta').innerHTML = `Data&nbsp;through <strong>${THROUGH}</strong>`;
-  const sel = document.getElementById('selPeriod');
-  const label = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : '—';
-  document.getElementById('periodBig').textContent = label;
-  document.getElementById('periodMeta').textContent =
-    S.period === 'ytd' ? `1 Jan – ${THROUGH}` : `Calendar month · ${YEAR}`;
   document.getElementById('headSub').textContent =
     'Retained, Referred, Presentations, Calls/Meetings and New Intermediaries, split by BDM.';
-  document.getElementById('funnelSub').textContent =
-    S.period === 'ytd' ? `Year-to-date totals through ${THROUGH}` : 'Selected month';
 }
 
 /* ────────── build ────────── */
 function render() {
   renderChrome();
-  renderKpis();
-  renderStageBars();
-  renderTable();
-  renderTrend();
+  renderStageBoxes();
 }
 
 buildPeriodSelect();
-buildTrendBdmToggle();
 initModal();
 syncUrl();
 render();

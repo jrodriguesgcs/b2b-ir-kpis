@@ -3,12 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Institutional Relations KPI Dashboard — Global Citizen Solutions</title>
+<title>Key Intermediaries Performance — Global Citizen Solutions</title>
 <link rel="icon" href="data:image/svg+xml;base64,__FAVICON__">
 <meta name="theme-color" content="#000957">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="preconnect" href="https://cdn.jsdelivr.net">
 <link href="https://fonts.googleapis.com/css2?family=Yrsa:wght@400;500;600;700&family=Heebo:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -91,16 +90,13 @@ a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible{
   display:flex;align-items:center;justify-content:center;padding:24px}
 .modal-backdrop[hidden]{display:none}
 .modal{background:var(--surface);border-radius:var(--radius-lg);box-shadow:var(--shadow-md);
-  max-width:480px;width:100%;max-height:80vh;overflow:auto;padding:24px}
+  max-width:560px;width:100%;max-height:92vh;overflow:auto;padding:24px}
 .modal h3{font-size:1.0625rem;margin-bottom:4px}
 .modal .text-caption{margin-bottom:16px}
 .modal-list{list-style:none;display:flex;flex-direction:column;gap:2px}
 .modal-list a{display:block;padding:10px 12px;border-radius:var(--radius-md);
   color:var(--primary);font-size:.875rem;font-weight:500;border:1px solid var(--border)}
 .modal-list a:hover{background:var(--muted-surface);text-decoration:none}
-.modal-group-heading{font-size:.6875rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
-  color:var(--muted);padding:10px 12px 4px;list-style:none}
-.modal-group-heading:first-child{padding-top:0}
 .modal-close{margin-top:18px;padding:8px 16px;border:1px solid var(--border-strong);
   border-radius:var(--radius-md);font-size:.8125rem;font-weight:600;color:var(--primary)}
 .modal-close:hover{background:var(--muted-surface)}
@@ -108,14 +104,6 @@ a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible{
 /* ── numeric cells that open a HubSpot record (Retained/Referred only) ─ */
 .num-link{font:inherit;color:inherit;padding:2px 6px;margin:-2px -6px;border-radius:3px}
 .num-link:hover{background:var(--muted-surface);text-decoration:underline}
-/* Inside a colored Funnel-by-BDM segment, the generic hover above (light
-   gray bg under white text) is nearly illegible - a translucent white
-   overlay keeps the existing white text readable instead. */
-.sb-seg .num-link:hover{background:rgba(255,255,255,.28);text-decoration:none}
-
-@media (prefers-reduced-motion: reduce){
-  .sb-seg,.sb-track{transition:none!important}
-}
 
 /* ── page header ─────────────────────────────────────── */
 .page-head{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;
@@ -143,22 +131,7 @@ a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible{
 .pill-good{background:#E6F7F1;color:#0F6B4C}
 .pill-info{background:#E7F0FF;color:#1B4E9B}
 
-/* ── period heading ──────────────────────────────────── */
-.period-hero{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;
-  flex-wrap:wrap;padding:10px 0 20px;margin-bottom:4px;border-bottom:1px solid var(--border)}
-.period-hero h2{font-size:2.625rem;line-height:1.05;letter-spacing:-.02em}
-.period-hero p{font-size:.8125rem;color:var(--muted);margin-top:5px}
-.period-scope{font-size:.75rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
-  color:var(--secondary);background:#E7F0FF;padding:6px 13px;border-radius:var(--radius-full)}
-
-/* ── KPI ─────────────────────────────────────────────── */
-.kpi-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:18px;margin-bottom:28px}
-.kpi{padding:20px 22px;position:relative;overflow:hidden;border-top:3px solid var(--stage-color,var(--primary))}
-.kpi-val{font-size:2.125rem;font-weight:700;color:var(--primary);line-height:1;
-  font-variant-numeric:tabular-nums;margin-top:9px}
-.kpi-row{display:flex;align-items:baseline;gap:11px;flex-wrap:wrap}
-.kpi-delta{font-size:.8125rem;font-weight:600;white-space:nowrap}
-.up{color:var(--success)} .down{color:var(--destructive)} .flat{color:var(--muted)}
+/* ── shared small-text helper (stage-box table's "This month" line) ─── */
 .kpi-sub{font-size:.75rem;color:var(--muted);margin-top:6px}
 
 /* ── sections ────────────────────────────────────────── */
@@ -169,28 +142,31 @@ a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible{
 .card-head .text-caption{margin-top:2px}
 .card-body{padding:22px}
 
-/* ── stage-by-BDM bars ───────────────────────────────── */
-.sb-row{display:grid;grid-template-columns:190px 1fr 200px;gap:16px;align-items:center;margin-bottom:14px}
-.sb-row:last-child{margin-bottom:0}
-.sb-label{font-size:.8125rem;font-weight:600;color:var(--primary);text-align:right}
-.sb-track{background:var(--muted-surface);border-radius:var(--radius-md);height:34px;display:flex;overflow:hidden}
-.sb-seg{height:100%;display:flex;align-items:center;justify-content:center;min-width:2px;
-  transition:width .45s cubic-bezier(.4,0,.2,1)}
-.sb-seg span{font-size:.75rem;font-weight:700;color:#fff;font-variant-numeric:tabular-nums;
-  white-space:nowrap;text-shadow:0 1px 2px rgba(0,0,0,.22)}
-.sb-total{text-align:right;font-size:.8125rem;color:var(--muted)}
-.sb-total b{color:var(--primary);font-variant-numeric:tabular-nums;font-size:.9375rem}
-.sb-key{display:flex;gap:22px;padding:0 0 18px 206px;border-bottom:1px solid var(--border);margin-bottom:18px;flex-wrap:wrap}
-.sb-key-item{display:flex;align-items:center;gap:8px;font-size:.8125rem;color:var(--muted)}
-.sb-key-item i{width:11px;height:11px;border-radius:3px;flex:none}
+/* ── per-stage ranked boxes ──────────────────────────── */
+/* Reuses .sec/.card/.card-head/.tbl-scroll/table.data as-is; only what's
+   new to that markup is styled here. Every box sets --stage-color inline,
+   and #stageBoxes is currently the only place rendering .sec.card, so
+   scoping the rule to the plain class pair is safe. */
+.sec.card{border-top:3px solid var(--stage-color,var(--border))}
+.rank-badge{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;
+  border-radius:50%;background:var(--muted-surface);color:var(--muted);font-size:.6875rem;
+  font-weight:700;margin-right:8px;flex:none;font-variant-numeric:tabular-nums}
+#stageBoxes table.data tbody tr:first-child .rank-badge{background:var(--secondary);color:#fff}
+.bdm-link{font:inherit;font-weight:600;color:var(--primary);padding:2px 6px;margin:-2px -6px;border-radius:3px}
+.bdm-link:hover{background:var(--muted-surface);text-decoration:underline}
 
-/* ── chart ───────────────────────────────────────────── */
-.chart-box{position:relative;height:320px}
-.legend{display:flex;gap:16px;flex-wrap:wrap;padding:14px 22px 0}
-.legend button{display:inline-flex;align-items:center;gap:7px;font-size:.75rem;color:var(--muted);
-  font-weight:500;transition:opacity .15s}
-.legend button[aria-pressed="false"]{opacity:.35}
-.legend .key{width:11px;height:11px;border-radius:3px;flex:none}
+/* ── BDM funnel modal (bar above, stats below, per stage) ─────────── */
+.funnel-row{padding:9px 0}
+.funnel-row + .funnel-row{border-top:1px solid var(--border)}
+.funnel-track{background:var(--muted-surface);border-radius:var(--radius-sm);height:26px;
+  display:flex;align-items:center;margin-bottom:8px}
+.funnel-bar{height:100%;border-radius:var(--radius-sm);min-width:10px;
+  transition:width .3s ease}
+.funnel-text{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap}
+.funnel-label{font-size:.8125rem;font-weight:600;color:var(--primary)}
+.funnel-val{font-size:.8125rem;color:var(--muted);font-variant-numeric:tabular-nums}
+.funnel-month{width:100%;text-align:right;font-size:.75rem;color:var(--muted)}
+@media (prefers-reduced-motion: reduce){ .funnel-bar{transition:none!important} }
 
 /* ── table ───────────────────────────────────────────── */
 .tbl-scroll{overflow-x:auto}
@@ -215,17 +191,9 @@ table.data tfoot td:first-child{background:var(--surface)}
   padding:18px 0;flex-wrap:wrap;font-size:.75rem;color:var(--on-navy-muted)}
 .foot-in strong{color:var(--on-navy-body);font-weight:500}
 
-@media (max-width:1180px){
-  .kpi-grid{grid-template-columns:repeat(3,1fr)}
-}
 @media (max-width:720px){
   .wrap{padding:0 18px}
-  .kpi-grid{grid-template-columns:1fr}
-  .sb-row{grid-template-columns:100px 1fr;grid-template-areas:"label track" ". total"}
-  .sb-label{grid-area:label} .sb-track{grid-area:track} .sb-total{grid-area:total}
-  .sb-key{padding-left:0}
   .text-h1{font-size:1.75rem}
-  .period-hero h2{font-size:1.875rem}
   .topbar-title{padding-left:0;border-left:none}
 }
 </style>

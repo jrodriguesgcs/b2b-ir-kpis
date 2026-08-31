@@ -7,7 +7,7 @@
   <div class="wrap topbar-in">
     <div class="topbar-left">
       <span class="topbar-logo" aria-label="Global Citizen Solutions">__LOGO_SECONDARY_WHITE__</span>
-      <span class="topbar-title">Institutional Relations KPI Dashboard</span>
+      <span class="topbar-title">Key Intermediaries Performance</span>
     </div>
     <div class="topbar-right">
       <span class="data-badge"><span class="dot"></span>Data&nbsp;through <strong id="badgeDate" style="color:#fff;font-weight:600">—</strong></span>
@@ -44,73 +44,8 @@
     </ul></div>
   </details>
 
-  <!-- ══ PERIOD HEADING ══ -->
-  <section class="period-hero">
-    <div>
-      <h2 id="periodBig">—</h2>
-      <p id="periodMeta">—</p>
-    </div>
-    <span class="period-scope" id="periodScope">Both BDMs</span>
-  </section>
-
-  <!-- ══ KPI ROW ══ -->
-  <section class="kpi-grid" id="kpis"></section>
-
-  <!-- ══ STAGE BY BDM ══ -->
-  <section class="sec card">
-    <div class="card-head">
-      <div>
-        <h3>Funnel by BDM</h3>
-        <p class="text-caption" id="funnelSub">—</p>
-      </div>
-    </div>
-    <div class="card-body">
-      <div class="sb-key" id="sbKey"></div>
-      <div id="stageBars"></div>
-    </div>
-  </section>
-
-  <!-- ══ TREND ══ -->
-  <section class="sec card">
-    <div class="card-head">
-      <div>
-        <h3>Trend</h3>
-        <p class="text-caption" id="trendSub">Monthly totals across the year, one line per stage.</p>
-      </div>
-      <div class="seg" role="group" aria-label="Filter trend by BDM" id="trendBdmSeg">
-        <button type="button" data-bdm="both" aria-pressed="true">Both</button>
-      </div>
-    </div>
-    <div class="legend" id="trendLegend"></div>
-    <div class="card-body" style="padding-top:14px"><div class="chart-box"><canvas id="trendChart"></canvas></div></div>
-  </section>
-
-  <!-- ══ BDM TABLE ══ -->
-  <section class="sec card">
-    <div class="card-head">
-      <div>
-        <h3 id="stageTableHeading">Stage performance by BDM</h3>
-        <p class="text-caption">Click a <b>Retained</b> or <b>Referred</b> number to open the underlying record(s) in HubSpot.</p>
-      </div>
-      <div class="controls">
-        <label class="ctl"><span class="text-overline">Period</span>
-          <select class="sel period-select" id="selPeriodTable" style="min-width:170px" aria-label="Period, Stage performance by BDM"></select></label>
-      </div>
-    </div>
-    <div class="tbl-scroll"><table class="data" id="stageTable" aria-labelledby="stageTableHeading">
-      <thead><tr>
-        <th scope="col" style="min-width:190px">BDM</th>
-        <th scope="col">Retained</th>
-        <th scope="col">Retained&nbsp;Target</th>
-        <th scope="col">Referred</th>
-        <th scope="col">Presentations</th>
-        <th scope="col">Calls/Meetings</th>
-        <th scope="col">Calls/Meetings&nbsp;Target</th>
-        <th scope="col">New&nbsp;Intermediaries</th>
-      </tr></thead>
-      <tbody></tbody><tfoot></tfoot>
-    </table></div>
-  </section>
+  <!-- ══ STAGE PERFORMANCE (per-stage ranked boxes, one per BOX_ORDER stage) ══ -->
+  <div id="stageBoxes"></div>
 
 </main>
 
