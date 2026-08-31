@@ -212,12 +212,20 @@ function syncUrl() {
   history.replaceState(null, '', url);
 }
 function buildPeriodSelect() {
-  const sel = document.getElementById('selPeriod');
+  const sels = Array.from(document.querySelectorAll('.period-select'));
   const opts = [['ytd', `Year to date (${YEAR})`]];
   for (let m = 1; m <= CURRENT_MONTH; m++) opts.push([`m-${String(m).padStart(2, '0')}`, `${MONTH_NAMES[m - 1]} ${YEAR}`]);
-  sel.innerHTML = opts.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
-  sel.value = S.period;
-  sel.addEventListener('change', () => { S.period = sel.value; syncUrl(); render(); });
+  const optionsHtml = opts.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
+  sels.forEach(sel => {
+    sel.innerHTML = optionsHtml;
+    sel.value = S.period;
+    sel.addEventListener('change', () => {
+      S.period = sel.value;
+      sels.forEach(other => { if (other !== sel) other.value = S.period; });
+      syncUrl();
+      render();
+    });
+  });
 }
 function buildTrendBdmToggle() {
   const seg = document.getElementById('trendBdmSeg');
@@ -247,18 +255,21 @@ function renderKpis() {
     const totalText = clickable && total
       ? `<span class="kpi-val"><button class="num-link" type="button" data-total-stage="${key}" aria-label="${escapeHtml(`${fmt(total)} ${stage.label} - open in HubSpot`)}">${fmt(total)}</button></span>`
       : `<span class="kpi-val">${fmt(total)}</span>`;
-    let subLine, targetNote = '';
+    let subLines, targetNote = '';
     if (key === 'calls_meetings') {
-      subLine = `${fmt(joao)}/${CALLS_TARGET} (${pct(joao, CALLS_TARGET)}%)&nbsp;João · ${fmt(rohan)}/${CALLS_TARGET} (${pct(rohan, CALLS_TARGET)}%)&nbsp;Rohan`;
+      subLines = [
+        `João&nbsp;${fmt(joao)}/${CALLS_TARGET}&nbsp;(${pct(joao, CALLS_TARGET)}%)`,
+        `Rohan&nbsp;${fmt(rohan)}/${CALLS_TARGET}&nbsp;(${pct(rohan, CALLS_TARGET)}%)`,
+      ];
       targetNote = `<div class="kpi-sub">Target ${CALLS_TARGET}/BDM/year</div>`;
     } else {
-      subLine = `João ${joaoText} · Rohan ${rohanText}`;
+      subLines = [`João ${joaoText} · Rohan ${rohanText}`];
       if (key === 'retained_clients') targetNote = `<div class="kpi-sub">Target ${RETAINED_TARGET}/BDM/year</div>`;
     }
     return `<div class="card kpi" style="--stage-color:${STAGE_COLOR_BY_KEY[key]}">
       <div class="text-overline">${stage.label}</div>
       <div class="kpi-row">${totalText}</div>
-      <div class="kpi-sub">${subLine}</div>
+      ${subLines.map(s => `<div class="kpi-sub">${s}</div>`).join('')}
       ${targetNote}
     </div>`;
   }).join('');
