@@ -257,9 +257,14 @@ function renderKpis() {
       : `<span class="kpi-val">${fmt(total)}</span>`;
     let subLines, targetNote = '';
     if (key === 'calls_meetings') {
+      // Target progress is cumulative-to-date (Jan 1 through the end of
+      // the selected period), not that period's own isolated count -
+      // matches the Stage-performance table's Calls/Meetings Target column.
+      const joaoCum = cumulativeThroughPeriod(key, OWNER_ORDER[0]);
+      const rohanCum = cumulativeThroughPeriod(key, OWNER_ORDER[1]);
       subLines = [
-        `João&nbsp;${fmt(joao)}/${CALLS_TARGET}&nbsp;(${pct(joao, CALLS_TARGET)}%)`,
-        `Rohan&nbsp;${fmt(rohan)}/${CALLS_TARGET}&nbsp;(${pct(rohan, CALLS_TARGET)}%)`,
+        `João&nbsp;${fmt(joaoCum)}/${CALLS_TARGET}&nbsp;(${pct(joaoCum, CALLS_TARGET)}%)`,
+        `Rohan&nbsp;${fmt(rohanCum)}/${CALLS_TARGET}&nbsp;(${pct(rohanCum, CALLS_TARGET)}%)`,
       ];
       targetNote = `<div class="kpi-sub">Target ${CALLS_TARGET}/BDM/year</div>`;
     } else {
