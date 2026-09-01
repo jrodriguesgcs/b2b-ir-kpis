@@ -20,29 +20,16 @@
   <!-- ══ PAGE HEADER ══ -->
   <header class="page-head">
     <div>
-      <h1 class="text-h1">BDM performance, year to date</h1>
+      <h1 class="text-h1">Key Intermediaries Performance</h1>
       <p class="text-caption" id="headSub" style="margin-top:6px">—</p>
     </div>
     <div class="controls">
       <label class="ctl"><span class="text-overline">Period</span>
         <select class="sel period-select" id="selPeriod" style="min-width:170px"></select></label>
+      <label class="ctl"><span class="text-overline">Director</span>
+        <select class="sel" id="selDirector" style="min-width:150px"></select></label>
     </div>
   </header>
-
-  <!-- ══ DATA COVERAGE NOTICE ══ -->
-  <details class="notice" id="notice">
-    <summary>Read this before acting on the numbers</summary>
-    <div class="notice-body"><ul>
-      <li>Every stage is scoped to <strong>this calendar year, through today</strong> - an in-progress
-        month has fewer days counted than a finished one, so it reads as month-to-date, not a shortfall.</li>
-      <li><strong>Retained Clients</strong> only counts deals actually signed within the current year -
-        a client referred last year but signed this year counts; one referred and signed both last year
-        does not carry over.</li>
-      <li>Numbers refresh once a day from HubSpot. Click a <strong>Retained</strong> or
-        <strong>Referred</strong> number anywhere on this page to open the underlying deal or
-        contact record directly in HubSpot.</li>
-    </ul></div>
-  </details>
 
   <!-- ══ STAGE PERFORMANCE (per-stage ranked boxes, one per BOX_ORDER stage) ══ -->
   <div id="stageBoxes"></div>

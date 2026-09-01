@@ -100,6 +100,13 @@ a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible{
 .modal-close{margin-top:18px;padding:8px 16px;border:1px solid var(--border-strong);
   border-radius:var(--radius-md);font-size:.8125rem;font-weight:600;color:var(--primary)}
 .modal-close:hover{background:var(--muted-surface)}
+.modal-row{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;padding:10px 12px;
+  border-radius:var(--radius-md);border:1px solid var(--border);font-size:.875rem}
+.modal-row a{color:var(--primary);font-weight:500;padding:2px 4px;margin:-2px -4px;border-radius:3px}
+.modal-row a:hover{background:var(--muted-surface);text-decoration:underline}
+.modal-row-sep{color:var(--border-strong)}
+.modal-row-meta{width:100%;font-size:.75rem;color:var(--muted);font-weight:400}
+.modal-item-missing{color:var(--muted);font-style:italic}
 
 /* ── numeric cells that open a HubSpot record (Retained/Referred only) ─ */
 .num-link{font:inherit;color:inherit;padding:2px 6px;margin:-2px -6px;border-radius:3px}
@@ -112,19 +119,6 @@ a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible{
 .ctl{display:flex;flex-direction:column;gap:5px}
 .ctl > .text-overline{font-size:.625rem}
 
-/* ── notice ──────────────────────────────────────────── */
-.notice{border:1px solid var(--border);border-left:3px solid var(--warning);
-  background:var(--surface);border-radius:var(--radius-lg);margin-bottom:28px;box-shadow:var(--shadow-xs)}
-.notice summary{cursor:pointer;list-style:none;padding:14px 20px;display:flex;align-items:center;
-  gap:10px;font-size:.875rem;font-weight:600;color:var(--primary)}
-.notice summary::-webkit-details-marker{display:none}
-.notice summary::after{content:"▾";margin-left:auto;color:var(--muted);font-size:.75rem;transition:transform .2s}
-.notice[open] summary::after{transform:rotate(180deg)}
-.notice-body{padding:0 20px 18px 20px}
-.notice-body ul{margin:0;padding-left:18px}
-.notice-body li{font-size:.8125rem;color:var(--foreground);margin-bottom:7px;line-height:1.55}
-.notice-body li:last-child{margin-bottom:0}
-.notice-body strong{color:var(--primary)}
 .pill{display:inline-block;font-size:.625rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
   padding:2px 7px;border-radius:var(--radius-sm);vertical-align:1px}
 .pill-warn{background:#FDF1E1;color:#93610F}
@@ -152,21 +146,6 @@ a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible{
   border-radius:50%;background:var(--muted-surface);color:var(--muted);font-size:.6875rem;
   font-weight:700;margin-right:8px;flex:none;font-variant-numeric:tabular-nums}
 #stageBoxes table.data tbody tr:first-child .rank-badge{background:var(--secondary);color:#fff}
-.bdm-link{font:inherit;font-weight:600;color:var(--primary);padding:2px 6px;margin:-2px -6px;border-radius:3px}
-.bdm-link:hover{background:var(--muted-surface);text-decoration:underline}
-
-/* ── BDM funnel modal (bar above, stats below, per stage) ─────────── */
-.funnel-row{padding:9px 0}
-.funnel-row + .funnel-row{border-top:1px solid var(--border)}
-.funnel-track{background:var(--muted-surface);border-radius:var(--radius-sm);height:26px;
-  display:flex;align-items:center;margin-bottom:8px}
-.funnel-bar{height:100%;border-radius:var(--radius-sm);min-width:10px;
-  transition:width .3s ease}
-.funnel-text{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap}
-.funnel-label{font-size:.8125rem;font-weight:600;color:var(--primary)}
-.funnel-val{font-size:.8125rem;color:var(--muted);font-variant-numeric:tabular-nums}
-.funnel-month{width:100%;text-align:right;font-size:.75rem;color:var(--muted)}
-@media (prefers-reduced-motion: reduce){ .funnel-bar{transition:none!important} }
 
 /* ── table ───────────────────────────────────────────── */
 .tbl-scroll{overflow-x:auto}

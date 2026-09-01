@@ -105,6 +105,16 @@ OWNER_NAMES = {
     "rohan": "Rohan Harris",
 }
 
+# The Screening pipeline sits upstream of Sales Pipeline; a deal is created
+# here first, then an automation moves the SAME deal object into Sales as
+# it qualifies - see HUBSPOT.md "Screening -> Sales pipeline flow". Needed
+# so a referred contact's own deal can be found even before it's promoted
+# into Sales Pipeline. Hardcoded (not label-resolved like the other
+# pipeline ids in resolve_reference_data) because HUBSPOT.md already gives
+# this exact, portal-confirmed id; resolve_reference_data() still asserts
+# it's a real pipeline on this portal before trusting it.
+SCREENING_PIPELINE_ID = "3403407568"
+
 
 class HubSpotError(RuntimeError):
     """Raised when a HubSpot API call fails after exhausting retries."""
@@ -278,6 +288,7 @@ class ReferenceData:
     owner_ids: dict = field(default_factory=dict)  # {"joao": "123", "rohan": "456"}
     deal_url_base: str = ""  # e.g. "https://app-eu1.hubspot.com/contacts/147203473/record/0-3/"
     contact_url_base: str = ""  # same, but object type 0-1 (Contacts)
+    company_url_base: str = ""  # same, but object type 0-2 (Companies)
 
 
 def resolve_reference_data(client: HubSpotClient) -> ReferenceData:
@@ -346,6 +357,12 @@ def resolve_reference_data(client: HubSpotClient) -> ReferenceData:
         raise HubSpotError("Could not resolve pipeline '[GCS] Institutional Relations'.")
     if not sales_pipeline_id or not proposal_accepted_stage_ids:
         raise HubSpotError("Could not resolve 'Sales Pipeline' / Proposal Accepted/Closed Won stage.")
+    known_pipeline_ids = {p["id"] for p in pipelines_resp.get("results", [])}
+    if SCREENING_PIPELINE_ID not in known_pipeline_ids:
+        raise HubSpotError(
+            f"SCREENING_PIPELINE_ID constant ({SCREENING_PIPELINE_ID}) not found among "
+            "this portal's deal pipelines - update the constant (see HUBSPOT.md)."
+        )
     print(f"  Pipeline '[GCS] Institutional Relations' id = {intermediary_pipeline_id}")
     print(f"  Pipeline '[GCS] Sales Pipeline' id           = {sales_pipeline_id}")
     print(f"  Stage id(s) Proposal Accepted/Closed Won    = {proposal_accepted_stage_ids}")
@@ -385,6 +402,7 @@ def resolve_reference_data(client: HubSpotClient) -> ReferenceData:
     ui_domain = account_info["uiDomain"]
     deal_url_base = f"https://{ui_domain}/contacts/{portal_id}/record/0-3/"
     contact_url_base = f"https://{ui_domain}/contacts/{portal_id}/record/0-1/"
+    company_url_base = f"https://{ui_domain}/contacts/{portal_id}/record/0-2/"
     print(f"  HubSpot portal = {portal_id} ({ui_domain})")
 
     print("=== Step 0 complete ===\n")
@@ -402,6 +420,7 @@ def resolve_reference_data(client: HubSpotClient) -> ReferenceData:
         owner_ids=owner_ids,
         deal_url_base=deal_url_base,
         contact_url_base=contact_url_base,
+        company_url_base=company_url_base,
     )
 
 
@@ -480,10 +499,75 @@ def year_start_ms() -> int:
     return int(year_start.timestamp() * 1000)
 
 
-def fetch_new_intermediaries(client: HubSpotClient, ref: ReferenceData) -> dict:
+def _batch_primary_association(client: HubSpotClient, from_type: str, to_type: str, ids: list) -> dict:
+    """Wraps HubSpotClient.batch_read_associations(), keeping only each
+    from_id's first associated to_id - HubSpot returns the primary
+    association first for the single-cardinality default associations this
+    is used for (a contact's primary company, a deal's/meeting's primary
+    contact). ASSUMPTION, flagged for live verification (same kind of
+    discovery _resolve_introducers() already did for the custom Introducer
+    association type id): if a record can legitimately carry several
+    associated contacts/companies and ordering isn't reliably "primary
+    first", switch to batch_read_associations_typed() and filter on
+    HubSpot's "Primary" typeId instead.
+    """
+    if not ids:
+        return {}
+    assoc = client.batch_read_associations(from_type, to_type, ids)
+    return {from_id: to_ids[0] for from_id, to_ids in assoc.items() if to_ids}
+
+
+def _resolve_companies_for_contacts(client: HubSpotClient, contact_ids: list) -> dict:
+    """{contact_id: {"id","name"} | None} - each contact's primary company."""
+    contact_to_company = _batch_primary_association(client, "contacts", "companies", contact_ids)
+    company_ids = list(set(contact_to_company.values()))
+    company_props = {c["id"]: c["properties"] for c in client.batch_read("companies", company_ids, ["name"])}
+    result = {}
+    for contact_id in contact_ids:
+        company_id = contact_to_company.get(contact_id)
+        if not company_id:
+            result[contact_id] = None
+            continue
+        name = company_props.get(company_id, {}).get("name")
+        result[contact_id] = {"id": company_id, "name": name or f"Company {company_id}"}
+    return result
+
+
+def _resolve_contact_and_company_for(client: HubSpotClient, object_type: str, object_ids: list) -> dict:
+    """{object_id: {"contact": {"id","name"}|None, "company": {"id","name"}|None}}
+    for any object_type with a direct contacts association (deals for
+    fetch_new_intermediaries, meetings for fetch_meetings). Two batched
+    association round trips + two batched property reads total, regardless
+    of how many object_ids are passed - no N+1 per object.
+    """
+    if not object_ids:
+        return {}
+    object_to_contact = _batch_primary_association(client, object_type, "contacts", object_ids)
+    contact_ids = list(set(object_to_contact.values()))
+    contact_props = {c["id"]: c["properties"] for c in client.batch_read("contacts", contact_ids, ["firstname", "lastname"])}
+    companies_by_contact = _resolve_companies_for_contacts(client, contact_ids)
+
+    result = {}
+    for object_id in object_ids:
+        contact_id = object_to_contact.get(object_id)
+        if not contact_id:
+            result[object_id] = {"contact": None, "company": None}
+            continue
+        props = contact_props.get(contact_id, {})
+        name = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
+        result[object_id] = {
+            "contact": {"id": contact_id, "name": name or f"Contact {contact_id}"},
+            "company": companies_by_contact.get(contact_id),
+        }
+    return result
+
+
+def fetch_new_intermediaries(client: HubSpotClient, ref: ReferenceData) -> tuple:
     """Stage: New Intermediaries. Deals in the [GCS] Institutional
     Relations pipeline, created this year so far, with a known owner.
-    Grouped by owner + calendar day of createdate.
+    Grouped by owner + calendar day of createdate. Also returns a per-deal
+    detail list (id, owner, day, resolved contact + company) for the
+    dashboard's click-through modal.
     """
     body = {
         "filterGroups": [
@@ -501,6 +585,7 @@ def fetch_new_intermediaries(client: HubSpotClient, ref: ReferenceData) -> dict:
     deals = client.search_all("deals", body)
 
     counts: dict = {}
+    deal_records: list = []
     other_owner_deals = []
     known_owner_ids = set(ref.owner_ids.values())
     for deal in deals:
@@ -514,6 +599,7 @@ def fetch_new_intermediaries(client: HubSpotClient, ref: ReferenceData) -> dict:
             continue
         day = parse_hubspot_datetime(created).date()
         counts[(owner_id, day)] = counts.get((owner_id, day), 0) + 1
+        deal_records.append({"id": deal["id"], "owner": owner_id, "day": day.isoformat()})
 
     grand_total = sum(counts.values())
     print(f"New Intermediaries: fetched {len(deals)} deals total, "
@@ -522,10 +608,17 @@ def fetch_new_intermediaries(client: HubSpotClient, ref: ReferenceData) -> dict:
         print(f"  {len(other_owner_deals)} deal(s) owned by someone other than João/Rohan "
               f"(excluded from BDM columns): {other_owner_deals[:10]}"
               + (" ..." if len(other_owner_deals) > 10 else ""))
-    return counts
+
+    contact_company_by_deal = _resolve_contact_and_company_for(client, "deals", [d["id"] for d in deal_records])
+    for record in deal_records:
+        extra = contact_company_by_deal.get(record["id"], {"contact": None, "company": None})
+        record["contact"] = extra["contact"]
+        record["company"] = extra["company"]
+
+    return counts, deal_records
 
 
-def fetch_meetings(client: HubSpotClient, ref: ReferenceData) -> tuple[dict, dict]:
+def fetch_meetings(client: HubSpotClient, ref: ReferenceData) -> tuple[dict, dict, list, list]:
     """Stages: Calls/Meetings and Presentations.
 
     Meetings associated with a deal owned by João/Rohan, where the meeting's
@@ -533,7 +626,13 @@ def fetch_meetings(client: HubSpotClient, ref: ReferenceData) -> tuple[dict, dic
     by hs_activity_type: != "Presentation" (incl. unknown) -> Calls/Meetings,
     == "Presentation" -> Presentations. Grouped by deal owner + calendar day
     of the meeting's start time, scoped to this calendar year so far.
-    Deduped by (meeting_id, deal_owner_id).
+    Deduped by (meeting_id, deal_owner_id) - a meeting attributed to both
+    BDMs produces one detail record per BDM, mirroring the count semantics.
+
+    Also returns per-meeting detail lists (id, owner, day, resolved
+    "introducer contact" + their company - i.e. the meeting's own associated
+    contact, an intermediary in this B2B context) for the dashboard's
+    click-through modal.
     """
     from datetime import date, datetime, timezone
 
@@ -571,6 +670,8 @@ def fetch_meetings(client: HubSpotClient, ref: ReferenceData) -> tuple[dict, dic
 
     meetings_counts: dict = {}
     presentations_counts: dict = {}
+    meetings_records: list = []
+    presentations_records: list = []
     skipped_no_start_time = []
     skipped_prior_year = 0
     skipped_future = 0
@@ -605,6 +706,15 @@ def fetch_meetings(client: HubSpotClient, ref: ReferenceData) -> tuple[dict, dic
                 continue
             bucket = presentations_counts if is_presentation else meetings_counts
             bucket[(owner_id, day)] = bucket.get((owner_id, day), 0) + 1
+            records = presentations_records if is_presentation else meetings_records
+            records.append({"id": meeting_id, "owner": owner_id, "day": day.isoformat()})
+
+    all_meeting_ids = list({r["id"] for r in meetings_records + presentations_records})
+    contact_company_by_meeting = _resolve_contact_and_company_for(client, "meetings", all_meeting_ids)
+    for record in meetings_records + presentations_records:
+        extra = contact_company_by_meeting.get(record["id"], {"contact": None, "company": None})
+        record["contact"] = extra["contact"]
+        record["company"] = extra["company"]
 
     meetings_total = sum(meetings_counts.values())
     presentations_total = sum(presentations_counts.values())
@@ -620,7 +730,7 @@ def fetch_meetings(client: HubSpotClient, ref: ReferenceData) -> tuple[dict, dic
     if skipped_future:
         print(f"  {skipped_future} qualifying meeting(s) excluded - already booked but haven't happened yet "
               f"(start time after today)")
-    return meetings_counts, presentations_counts
+    return meetings_counts, presentations_counts, meetings_records, presentations_records
 
 
 def _partner_referral_value(client: HubSpotClient, property_name: str) -> str:
@@ -730,6 +840,43 @@ def _resolve_introducers(client: HubSpotClient, ref: ReferenceData, referred_con
     return result
 
 
+def _resolve_contact_programs(client: HubSpotClient, ref: ReferenceData, contact_ids: list) -> dict:
+    """For each contact id, resolve `country_and_program_of_interest` from
+    its own deal in the Sales Pipeline (preferred) or Screening pipeline
+    (fallback) - per HUBSPOT.md, a deal is created in Screening first then
+    moved (same deal object) into Sales by automation, so a contact
+    normally has at most one qualifying deal spanning both stages; if a
+    contact genuinely has separate deals in both pipelines simultaneously,
+    Sales Pipeline wins, matching the existing MQL/SQL precedence in
+    HUBSPOT.md. Returns {contact_id: program_string | None}.
+    """
+    if not contact_ids:
+        return {}
+    contact_to_deals = client.batch_read_associations("contacts", "deals", contact_ids)
+    all_deal_ids = list({d for deals in contact_to_deals.values() for d in deals})
+    deal_props = client.batch_read("deals", all_deal_ids, ["pipeline", "country_and_program_of_interest"])
+    deal_by_id = {d["id"]: d["properties"] for d in deal_props}
+
+    result = {}
+    multi_pipeline = []
+    for contact_id in contact_ids:
+        sales_deal = screening_deal = None
+        for deal_id in contact_to_deals.get(contact_id, []):
+            props = deal_by_id.get(deal_id, {})
+            if props.get("pipeline") == ref.sales_pipeline_id and sales_deal is None:
+                sales_deal = props
+            elif props.get("pipeline") == SCREENING_PIPELINE_ID and screening_deal is None:
+                screening_deal = props
+        chosen = sales_deal or screening_deal
+        if sales_deal and screening_deal:
+            multi_pipeline.append(contact_id)
+        result[contact_id] = (chosen or {}).get("country_and_program_of_interest")
+    if multi_pipeline:
+        print(f"    {len(multi_pipeline)} referred contact(s) with deals in BOTH Sales and "
+              f"Screening pipelines - used Sales Pipeline's program value: {multi_pipeline[:10]}")
+    return result
+
+
 def fetch_referred_clients(client: HubSpotClient, ref: ReferenceData):
     """Stage: Referred Clients. Partner-Referral contacts with a
     resolvable introducer owned by João/Rohan, scoped to this calendar
@@ -763,7 +910,7 @@ def fetch_referred_clients(client: HubSpotClient, ref: ReferenceData):
             referred_id = referred["id"]
             if referred_id not in introducers:
                 continue
-            _, owner_id = introducers[referred_id]
+            introducer_id, owner_id = introducers[referred_id]
             props = referred["properties"]
             created = props.get("createdate")
             if not created:
@@ -776,6 +923,7 @@ def fetch_referred_clients(client: HubSpotClient, ref: ReferenceData):
                 "name": name or f"Contact {referred_id}",
                 "owner": owner_id,
                 "day": day.isoformat(),
+                "_introducer_id": introducer_id,  # resolved to introducer_company below, then dropped
             })
         total = sum(counts.values())
         print(f"  candidate '{property_name}': grand total = {total}")
@@ -785,6 +933,21 @@ def fetch_referred_clients(client: HubSpotClient, ref: ReferenceData):
     property_name, total, counts, contacts = best
     print(f"Referred Clients: using '{property_name}', total = {total} (year-to-date; "
           f"all-time accepted ground truth was 20)")
+
+    # Enrich only the winning candidate's contacts (deliberately after `best`
+    # is picked, so discarded lead-source candidates never cost extra
+    # HubSpot calls) with the country/program of interest of the referred
+    # contact's own deal, and the company of the introducer who referred
+    # them - both needed by the dashboard's click-through modal.
+    contact_ids = [c["id"] for c in contacts]
+    programs = _resolve_contact_programs(client, ref, contact_ids)
+    introducer_ids = list({c["_introducer_id"] for c in contacts})
+    introducer_companies = _resolve_companies_for_contacts(client, introducer_ids)
+    for c in contacts:
+        c["program"] = programs.get(c["id"])
+        company = introducer_companies.get(c.pop("_introducer_id"))
+        c["introducer_company"] = company["name"] if company else None
+
     return property_name, counts, contacts
 
 
@@ -1492,19 +1655,33 @@ DASHBOARD_STAGE_ORDER = [
     "new_intermediaries",
 ]
 
+# Which JSON key each stage's per-record detail array is stored under -
+# "deals" for Retained (links to the deal record), "contacts" for Referred
+# (no deal in its own logic - links to the contact record instead; see
+# CLAUDE.md's Retained-links-to-deal/Referred-links-to-contact note),
+# "records" for the three company+contact stages (Presentations,
+# Calls/Meetings, New Intermediaries) added for the dashboard UX pass.
+STAGE_DETAIL_FIELD = {
+    "retained_clients": "deals",
+    "referred_clients": "contacts",
+    "new_intermediaries": "records",
+    "presentations": "records",
+    "calls_meetings": "records",
+}
+
 
 def build_dashboard_data(
     kpi_data_list: list,
     program_breakdown: dict,
-    retained_deals: list,
-    referred_contacts: list,
     ref: ReferenceData,
     today: date,
+    stage_details: dict,
 ) -> dict:
     """Serialize the same computed KPI data that feeds the Excel workbook into
     a small, sparse JSON structure for the web dashboard. No new HubSpot
-    calls - this is a pure reshape of numbers already fetched and verified
-    upstream, exactly the numbers `build_workbook` renders into cells.
+    calls of its own - this is a reshape of numbers/records already fetched
+    and verified upstream (stage_details holds each stage's per-record
+    detail list, keyed by STAGE_KEYS, attached under STAGE_DETAIL_FIELD).
 
     Sparse by design (only days with a nonzero count are present), mirroring
     how the example `gcs-hubspot-funnel-reporting` dashboard keeps its own
@@ -1526,13 +1703,11 @@ def build_dashboard_data(
                 owner_bucket = program_daily.setdefault(str(owner_id), {})
                 owner_bucket.setdefault(program, {})[day.isoformat()] = count
             stage_entry["program_breakdown"] = program_daily
-            # Per-deal records behind those numbers, for the dashboard's
-            # click-through-to-HubSpot feature.
-            stage_entry["deals"] = retained_deals
-        elif key == "referred_clients":
-            # Referred Clients has no deal in this logic at all - click-
-            # through links to the Contact record instead.
-            stage_entry["contacts"] = referred_contacts
+        detail_field = STAGE_DETAIL_FIELD.get(key)
+        if detail_field and key in stage_details:
+            # Per-record detail behind those numbers, for the dashboard's
+            # click-through-to-HubSpot modal.
+            stage_entry[detail_field] = stage_details[key]
         stages[key] = stage_entry
 
     return {
@@ -1542,6 +1717,7 @@ def build_dashboard_data(
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "deal_url_base": ref.deal_url_base,
             "contact_url_base": ref.contact_url_base,
+            "company_url_base": ref.company_url_base,
         },
         "owners": {str(joao_id): owners[joao_id], str(rohan_id): owners[rohan_id]},
         "owner_order": [str(joao_id), str(rohan_id)],
@@ -1563,8 +1739,8 @@ def main() -> int:
     client = HubSpotClient(access_token)
     ref = resolve_reference_data(client)
 
-    new_intermediaries = fetch_new_intermediaries(client, ref)
-    new_meetings, new_presentations = fetch_meetings(client, ref)
+    new_intermediaries, new_intermediary_records = fetch_new_intermediaries(client, ref)
+    new_meetings, new_presentations, new_meeting_records, new_presentation_records = fetch_meetings(client, ref)
     lead_source_property, referred_clients, referred_contacts = fetch_referred_clients(client, ref)
     retained_clients, retained_program_breakdown, retained_deals = fetch_retained_clients(
         client, ref, lead_source_property
@@ -1582,7 +1758,14 @@ def main() -> int:
     # stay in this file, unused, in case the workbook ever comes back.
 
     dashboard_data = build_dashboard_data(
-        kpi_data_list, retained_program_breakdown, retained_deals, referred_contacts, ref, today
+        kpi_data_list, retained_program_breakdown, ref, today,
+        stage_details={
+            "retained_clients": retained_deals,
+            "referred_clients": referred_contacts,
+            "new_intermediaries": new_intermediary_records,
+            "presentations": new_presentation_records,
+            "calls_meetings": new_meeting_records,
+        },
     )
     os.makedirs(os.path.join("dashboard", "data"), exist_ok=True)
     dashboard_data_path = os.path.join("dashboard", "data", "kpi-data.json")

@@ -24,8 +24,17 @@ function initialPeriodFromUrl() {
   if (p && /^m-(0[1-9]|1[0-2])$/.test(p) && +p.slice(2) <= CURRENT_MONTH) return p;
   return 'ytd';
 }
-const S = { period: initialPeriodFromUrl() };
+function initialDirectorFromUrl() {
+  const d = new URLSearchParams(window.location.search).get('director');
+  return d && OWNER_ORDER.includes(d) ? d : null; // null = All Directors
+}
+const S = { period: initialPeriodFromUrl(), director: initialDirectorFromUrl() };
 let lastFocusedEl = null;
+/* The Director(s) currently in scope - just the selected one when the
+   Director filter is active, both (in display order) when it's "All". */
+function activeOwners() {
+  return S.director ? [S.director] : OWNER_ORDER;
+}
 
 /* ────────── data access ────────── */
 const fmt = n => (n == null ? '—' : n.toLocaleString('en-US'));
@@ -35,10 +44,11 @@ function monthPrefix(m) { return `${YEAR}-${String(m).padStart(2, '0')}-`; }
 function periodMatch(day) {
   return S.period === 'ytd' ? true : day.startsWith(monthPrefix(+S.period.slice(2)));
 }
-/* Sum a stage's daily counts for one owner (or both, if ownerId is null) over the current period. */
+/* Sum a stage's daily counts for one owner (or the active Director(s), if
+   ownerId is null) over the current period. */
 function stageSum(stageKey, ownerId) {
   const daily = D.stages[stageKey].daily;
-  const ids = ownerId ? [ownerId] : OWNER_ORDER;
+  const ids = ownerId ? [ownerId] : activeOwners();
   let t = 0;
   for (const id of ids) {
     const days = daily[id] || {};
@@ -46,11 +56,12 @@ function stageSum(stageKey, ownerId) {
   }
   return t;
 }
-/* Sum a stage for a specific month, for one owner or both (ownerId null) - regardless of S.period. */
+/* Sum a stage for a specific month, for one owner or the active Director(s)
+   (ownerId null) - regardless of S.period. */
 function stageMonthTotal(stageKey, month, ownerId) {
   const daily = D.stages[stageKey].daily;
   const prefix = monthPrefix(month);
-  const ids = ownerId ? [ownerId] : OWNER_ORDER;
+  const ids = ownerId ? [ownerId] : activeOwners();
   let t = 0;
   for (const id of ids) {
     const days = daily[id] || {};
@@ -68,7 +79,7 @@ function cumulativeThroughPeriod(stageKey, ownerId) {
   const month = +S.period.slice(2);
   const cutoff = `${YEAR}-${String(month).padStart(2, '0')}-31`; // lexicographic ISO cutoff
   const daily = D.stages[stageKey].daily;
-  const ids = ownerId ? [ownerId] : OWNER_ORDER;
+  const ids = ownerId ? [ownerId] : activeOwners();
   let t = 0;
   for (const id of ids) {
     const days = daily[id] || {};
@@ -77,7 +88,8 @@ function cumulativeThroughPeriod(stageKey, ownerId) {
   return t;
 }
 
-/* ────────── click-through-to-HubSpot (Retained -> deal, Referred -> contact) ────────── */
+/* ────────── click-through-to-HubSpot (Retained -> deal, Referred -> contact,
+   Presentations/Calls/Meetings/New Intermediaries -> company + contact) ─── */
 function recordsFor(stageKey, ownerId, program) {
   if (stageKey === 'retained_clients') {
     const deals = D.stages.retained_clients.deals || [];
@@ -86,6 +98,10 @@ function recordsFor(stageKey, ownerId, program) {
   if (stageKey === 'referred_clients') {
     const contacts = D.stages.referred_clients.contacts || [];
     return { kind: 'contact', records: contacts.filter(c => periodMatch(c.day) && (!ownerId || c.owner === ownerId)) };
+  }
+  if (stageKey === 'presentations' || stageKey === 'calls_meetings' || stageKey === 'new_intermediaries') {
+    const records = D.stages[stageKey].records || [];
+    return { kind: 'companyContact', records: records.filter(r => periodMatch(r.day) && (!ownerId || r.owner === ownerId)) };
   }
   return { kind: null, records: [] };
 }
@@ -99,23 +115,24 @@ function clickableCell(stageKey, value, ownerId) {
   const label = `${fmt(value)} ${D.stages[stageKey].label}${who} - open in HubSpot`;
   return `<button class="num-link" type="button" data-stage="${stageKey}" data-owner="${ownerId || ''}" aria-label="${escapeHtml(label)}">${fmt(value)}</button>`;
 }
+/* Always opens a modal first - never redirects straight to HubSpot, even
+   when there's exactly one underlying record. The modal's own links are
+   the only way to actually leave the page. */
 function onNumLinkClick(btn) {
   const stageKey = btn.dataset.stage;
   const owner = btn.dataset.owner || null;
   const { kind, records } = recordsFor(stageKey, owner, null);
   if (!records.length) return;
-  const urlBase = kind === 'deal' ? D.meta.deal_url_base : D.meta.contact_url_base;
-  if (records.length === 1) {
-    window.open(urlBase + records[0].id, '_blank', 'noopener');
-    return;
-  }
   const parts = [D.stages[stageKey].label];
   if (owner) parts.push(OWNER_NAME[owner]);
-  openRecordModal(records, urlBase, parts.join(' · '));
+  const title = parts.join(' · ');
+  if (kind === 'deal') { openRecordModal(records, D.meta.deal_url_base, title); return; }
+  if (kind === 'contact') { openReferredModal(records, title); return; }
+  if (kind === 'companyContact') { openCompanyContactModal(records, title); return; }
 }
 /* Shared modal-open plumbing (show, set focus, attach the focus-trap/
-   Escape listener) - used by both openRecordModal() (link list) and
-   openFunnelModal() (a BDM's own mini funnel), which only differ in the
+   Escape listener) - used by every record-list modal (openRecordModal,
+   openReferredModal, openCompanyContactModal), which differ only in the
    list markup they build. */
 function showModal(title, subtitle, listHtml) {
   document.getElementById('dealModalTitle').textContent = title;
@@ -133,42 +150,40 @@ function showModal(title, subtitle, listHtml) {
 }
 function openRecordModal(records, urlBase, title) {
   const itemHtml = r => `<li><a href="${urlBase}${r.id}" target="_blank" rel="noopener">${escapeHtml(r.name)}${r.program ? ' · ' + escapeHtml(r.program) : ''}</a></li>`;
-  showModal(title, `${records.length} - click one to open it in HubSpot`, records.map(itemHtml).join(''));
+  const subtitle = `${records.length} record${records.length === 1 ? '' : 's'} - click one to open it in HubSpot`;
+  showModal(title, subtitle, records.map(itemHtml).join(''));
 }
-/* A BDM's own mini funnel across all 5 stages for the currently selected
-   period - opened by clicking their name in any stage box. Each row is a
-   bar (width proportional to that stage's cumulative-to-date value, scaled
-   against this BDM's own largest stage) with the label/value/target text
-   below it - BOX_ORDER already runs Retained (smallest, typically) first
-   through Calls/Meetings (largest) last, so rendering top-to-bottom in that
-   order alone gives the narrow-top/big-bottom funnel shape. */
-function openFunnelModal(ownerId) {
-  const isMonth = S.period !== 'ytd';
-  const month = isMonth ? +S.period.slice(2) : null;
-  const cums = BOX_ORDER.map(key => cumulativeThroughPeriod(key, ownerId));
-  const maxCum = Math.max(...cums, 0);
-  const MIN_WIDTH = 8; // percent floor so a near-zero stage's bar stays visible
-  const rows = BOX_ORDER.map((key, i) => {
-    const cum = cums[i];
-    const target = targetToDate(key, ownerId);
-    const width = maxCum ? Math.max(MIN_WIDTH, Math.round((cum / maxCum) * 100)) : MIN_WIDTH;
-    let monthLine = '';
-    if (isMonth) {
-      const monthQty = stageMonthTotal(key, month, ownerId);
-      const mTarget = monthlyTarget(key, ownerId);
-      monthLine = `<span class="funnel-month">This month: ${fmt(monthQty)}/${mTarget} (${pct(monthQty, mTarget)}%)</span>`;
-    }
-    return `<li class="funnel-row">
-      <div class="funnel-track"><div class="funnel-bar" style="width:${width}%;background:${STAGE_COLOR_BY_KEY[key]}"></div></div>
-      <div class="funnel-text">
-        <span class="funnel-label">${escapeHtml(D.stages[key].label)}</span>
-        <span class="funnel-val">${fmt(cum)}/${target} (${pct(cum, target)}%)</span>
-        ${monthLine}
-      </div>
+/* Referred Clients modal - the client's own name stays the sole link (the
+   HubSpot record actually being counted); program of interest and the
+   introducer's company render as plain descriptive text underneath, since
+   neither is itself a navigable HubSpot record here (introducer_company
+   carries no id in the data). */
+function openReferredModal(records, title) {
+  const itemHtml = r => {
+    const meta = [r.program, r.introducer_company].filter(Boolean).map(escapeHtml).join(' · ');
+    return `<li class="modal-row">
+      <a href="${D.meta.contact_url_base}${r.id}" target="_blank" rel="noopener">${escapeHtml(r.name)}</a>
+      ${meta ? `<span class="modal-row-meta">${meta}</span>` : ''}
     </li>`;
-  }).join('');
-  const subtitle = S.period === 'ytd' ? `Year-to-date totals through ${THROUGH}` : 'Selected month, cumulative to date';
-  showModal(OWNER_NAME[ownerId], subtitle, rows);
+  };
+  const subtitle = `${records.length} record${records.length === 1 ? '' : 's'} - click a name to open the contact in HubSpot`;
+  showModal(title, subtitle, records.map(itemHtml).join(''));
+}
+/* Presentations / Calls-Meetings / New Intermediaries modal - each row
+   hyperlinks the company name and the contact name (first + last)
+   separately, straight to their own HubSpot records. A record with no
+   resolved company (not every meeting/deal has one) shows plain text
+   instead of a dead link. */
+function openCompanyContactModal(records, title) {
+  const itemHtml = r => {
+    const companyHtml = r.company
+      ? `<a href="${D.meta.company_url_base}${r.company.id}" target="_blank" rel="noopener">${escapeHtml(r.company.name)}</a>`
+      : `<span class="modal-item-missing">No company on record</span>`;
+    const contactHtml = `<a href="${D.meta.contact_url_base}${r.contact.id}" target="_blank" rel="noopener">${escapeHtml(r.contact.name)}</a>`;
+    return `<li class="modal-row">${companyHtml}<span class="modal-row-sep" aria-hidden="true">·</span>${contactHtml}</li>`;
+  };
+  const subtitle = `${records.length} record${records.length === 1 ? '' : 's'} - click a company or contact to open it in HubSpot`;
+  showModal(title, subtitle, records.map(itemHtml).join(''));
 }
 function closeRecordModal() {
   document.getElementById('dealModalBackdrop').hidden = true;
@@ -194,10 +209,12 @@ function initModal() {
   });
 }
 
-/* ────────── period control ────────── */
+/* ────────── period / director controls ────────── */
 function syncUrl() {
   const url = new URL(window.location.href);
   url.searchParams.set('period', S.period);
+  if (S.director) url.searchParams.set('director', S.director);
+  else url.searchParams.delete('director');
   history.replaceState(null, '', url);
 }
 function buildPeriodSelect() {
@@ -216,27 +233,41 @@ function buildPeriodSelect() {
     });
   });
 }
+function buildDirectorSelect() {
+  const sel = document.getElementById('selDirector');
+  const opts = [['', 'All Directors'], ...OWNER_ORDER.map(id => [id, OWNER_NAME[id]])];
+  sel.innerHTML = opts.map(([v, l]) => `<option value="${v}">${escapeHtml(l)}</option>`).join('');
+  sel.value = S.director || '';
+  sel.addEventListener('change', () => {
+    S.director = sel.value || null;
+    syncUrl();
+    render();
+  });
+}
 
 /* ────────── per-stage ranked boxes ────────── */
 /* Target-to-date denominator: the flat annual per-BDM target, unprorated -
-   doubled for the combined Total row (ownerId null). Paired with the
-   existing cumulative-to-date numerator (cumulativeThroughPeriod()), so the
-   percentage reflects progress made so far against the full year's goal,
-   not a shrunk goal for the elapsed months. */
+   multiplied by how many Directors are in scope for the combined Total row
+   (ownerId null) - 1 when the Director filter narrows to one, 2 for "All".
+   Paired with the existing cumulative-to-date numerator
+   (cumulativeThroughPeriod()), so the percentage reflects progress made so
+   far against the full year's goal, not a shrunk goal for the elapsed
+   months. */
 function targetToDate(stageKey, ownerId) {
-  return D.targets[stageKey].per_bdm_annual * (ownerId ? 1 : 2);
+  return D.targets[stageKey].per_bdm_annual * (ownerId ? 1 : activeOwners().length);
 }
 /* "This month" secondary line's denominator - one twelfth of the annual
-   target, doubled for the combined Total row. Only shown when a single
+   target, scaled the same way as targetToDate(). Only shown when a single
    month (not YTD) is selected. */
 function monthlyTarget(stageKey, ownerId) {
-  return Math.round(D.targets[stageKey].per_bdm_annual * (ownerId ? 1 : 2) / 12);
+  return Math.round(D.targets[stageKey].per_bdm_annual * (ownerId ? 1 : activeOwners().length) / 12);
 }
-/* Rank the two BDMs by a stage's quantity for the selected period,
-   higher first; ties keep OWNER_ORDER's existing order (João before
-   Rohan). */
+/* Rank the active Director(s) by a stage's quantity for the selected
+   period, higher first; ties keep OWNER_ORDER's existing order (João
+   before Rohan). With the Director filter active this naturally returns
+   a single-element array (that Director, rank 1). */
 function rankedOwners(stageKey) {
-  return OWNER_ORDER
+  return activeOwners()
     .map((id, idx) => ({ id, idx, sum: stageSum(stageKey, id) }))
     .sort((a, b) => b.sum - a.sum || a.idx - b.idx)
     .map(o => o.id);
@@ -245,15 +276,16 @@ function renderStageBox(key) {
   const stage = D.stages[key];
   const isMonth = S.period !== 'ytd';
   const month = isMonth ? +S.period.slice(2) : null;
-  const clickable = key === 'retained_clients' || key === 'referred_clients';
+  const showRank = !S.director; // ranking a list of one Director is noise
+  const showTotal = !S.director; // would duplicate the single row's own numbers
   const headingId = `stageBoxHeading-${key}`;
   const bodyRow = (ownerId, rank) => {
     const qty = stageSum(key, ownerId);
     const cum = cumulativeThroughPeriod(key, ownerId);
     const target = targetToDate(key, ownerId);
-    const qtyCell = clickable ? clickableCell(key, qty, ownerId) : fmt(qty);
+    const qtyCell = clickableCell(key, qty, ownerId);
     const nameCell = rank
-      ? `<span class="rank-badge">${rank}</span><button class="bdm-link" type="button" data-owner="${ownerId}" aria-label="${escapeHtml(`Open ${OWNER_NAME[ownerId]}'s funnel across all stages`)}">${escapeHtml(OWNER_NAME[ownerId])}</button>`
+      ? `${showRank ? `<span class="rank-badge">${rank}</span>` : ''}${escapeHtml(OWNER_NAME[ownerId])}`
       : '<b>Total</b>';
     let monthCell = '';
     if (isMonth) {
@@ -274,18 +306,18 @@ function renderStageBox(key) {
     <div class="card-head">
       <div>
         <h3 id="${headingId}">${escapeHtml(stage.label)}</h3>
-        ${clickable ? '<p class="text-caption">Click a BDM\'s name for their full funnel, or their quantity to open it in HubSpot.</p>' : '<p class="text-caption">Click a BDM\'s name for their full funnel across all stages.</p>'}
+        <p class="text-caption">Click a quantity to open the underlying records in HubSpot.</p>
       </div>
     </div>
     <div class="tbl-scroll"><table class="data" aria-labelledby="${headingId}">
       <thead><tr>
-        <th scope="col" style="text-align:left">BDM</th>
+        <th scope="col" style="text-align:left">Director</th>
         <th scope="col">Quantity</th>
         <th scope="col">Target to date</th>
         ${isMonth ? '<th scope="col">This month</th>' : ''}
       </tr></thead>
       <tbody>${ranked.map((id, i) => bodyRow(id, i + 1)).join('')}</tbody>
-      <tfoot>${bodyRow(null, null)}</tfoot>
+      <tfoot>${showTotal ? bodyRow(null, null) : ''}</tfoot>
     </table></div>
   </section>`;
 }
@@ -293,8 +325,6 @@ function renderStageBoxes() {
   const el = document.getElementById('stageBoxes');
   el.innerHTML = BOX_ORDER.map(renderStageBox).join('');
   el.querySelectorAll('.num-link').forEach(bindNumLink);
-  el.querySelectorAll('.bdm-link').forEach(btn =>
-    btn.addEventListener('click', () => openFunnelModal(btn.dataset.owner)));
 }
 function bindNumLink(btn) {
   btn.addEventListener('click', () => onNumLinkClick(btn));
@@ -305,7 +335,7 @@ function renderChrome() {
   document.getElementById('badgeDate').textContent = THROUGH;
   document.getElementById('footMeta').innerHTML = `Data&nbsp;through <strong>${THROUGH}</strong>`;
   document.getElementById('headSub').textContent =
-    'Retained, Referred, Presentations, Calls/Meetings and New Intermediaries, split by BDM.';
+    'Retained, Referred, New Intermediaries, Presentations, Calls/Meetings, split by Director.';
 }
 
 /* ────────── build ────────── */
@@ -315,6 +345,7 @@ function render() {
 }
 
 buildPeriodSelect();
+buildDirectorSelect();
 initModal();
 syncUrl();
 render();
