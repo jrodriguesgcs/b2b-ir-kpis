@@ -179,7 +179,9 @@ function openCompanyContactModal(records, title) {
     const companyHtml = r.company
       ? `<a href="${D.meta.company_url_base}${r.company.id}" target="_blank" rel="noopener">${escapeHtml(r.company.name)}</a>`
       : `<span class="modal-item-missing">No company on record</span>`;
-    const contactHtml = `<a href="${D.meta.contact_url_base}${r.contact.id}" target="_blank" rel="noopener">${escapeHtml(r.contact.name)}</a>`;
+    const contactHtml = r.contact
+      ? `<a href="${D.meta.contact_url_base}${r.contact.id}" target="_blank" rel="noopener">${escapeHtml(r.contact.name)}</a>`
+      : `<span class="modal-item-missing">No contact on record</span>`;
     return `<li class="modal-row">${companyHtml}<span class="modal-row-sep" aria-hidden="true">·</span>${contactHtml}</li>`;
   };
   const subtitle = `${records.length} record${records.length === 1 ? '' : 's'} - click a company or contact to open it in HubSpot`;
