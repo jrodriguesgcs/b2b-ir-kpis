@@ -24,7 +24,11 @@
     </div>
     <div class="controls">
       <label class="ctl"><span class="text-overline">Period</span>
-        <select class="sel period-select" id="selPeriod" style="min-width:170px"></select></label>
+        <span class="period-with-week">
+          <button class="week-picker-btn" id="weekPickerBtn" type="button" aria-pressed="false" hidden>+</button>
+          <select class="sel period-select" id="selPeriod" style="min-width:170px"></select>
+        </span>
+      </label>
       <label class="ctl"><span class="text-overline">Director</span>
         <select class="sel" id="selDirector" style="min-width:150px"></select></label>
     </div>
@@ -41,12 +45,22 @@
   <span id="footMeta">—</span>
 </div></footer>
 
-<!-- ══ RECORD MODAL (Retained/Referred click-through) ══ -->
+<!-- ══ RECORD MODAL (Retained/Referred/company-contact click-through) ══ -->
 <div class="modal-backdrop" id="dealModalBackdrop" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dealModalTitle" aria-describedby="dealModalSub" id="dealModal">
     <h3 id="dealModalTitle" tabindex="-1">—</h3>
     <p class="text-caption" id="dealModalSub">—</p>
     <ul class="modal-list" id="dealModalList"></ul>
     <button class="modal-close" id="dealModalClose" type="button">Close</button>
+  </div>
+</div>
+
+<!-- ══ WEEK PICKER (compact dialog opened from the "+" next to the Period select) ══ -->
+<div class="modal-backdrop" id="weekModalBackdrop" hidden>
+  <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="weekModalTitle" aria-describedby="weekModalSub" id="weekModal">
+    <h3 id="weekModalTitle" tabindex="-1">—</h3>
+    <p class="text-caption" id="weekModalSub">—</p>
+    <ul class="modal-list" id="weekModalList"></ul>
+    <button class="modal-close" id="weekModalClose" type="button">Close</button>
   </div>
 </div>

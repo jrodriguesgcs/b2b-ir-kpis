@@ -518,8 +518,26 @@ def _batch_primary_association(client: HubSpotClient, from_type: str, to_type: s
 
 
 def _resolve_companies_for_contacts(client: HubSpotClient, contact_ids: list) -> dict:
-    """{contact_id: {"id","name"} | None} - each contact's primary company."""
+    """{contact_id: {"id","name"} | None} - each contact's primary company.
+
+    Falls back to the company on the contact's own deal when the contact has
+    no direct company association of its own - a real, common gap (not every
+    contact gets a company attached, but most have a deal that does).
+    """
     contact_to_company = _batch_primary_association(client, "contacts", "companies", contact_ids)
+
+    missing_ids = [cid for cid in contact_ids if cid not in contact_to_company]
+    if missing_ids:
+        contact_to_deals = client.batch_read_associations("contacts", "deals", missing_ids)
+        all_deal_ids = list({d for deals in contact_to_deals.values() for d in deals})
+        deal_to_company = _batch_primary_association(client, "deals", "companies", all_deal_ids)
+        for contact_id in missing_ids:
+            for deal_id in contact_to_deals.get(contact_id, []):
+                company_id = deal_to_company.get(deal_id)
+                if company_id:
+                    contact_to_company[contact_id] = company_id
+                    break
+
     company_ids = list(set(contact_to_company.values()))
     company_props = {c["id"]: c["properties"] for c in client.batch_read("companies", company_ids, ["name"])}
     result = {}
@@ -945,8 +963,7 @@ def fetch_referred_clients(client: HubSpotClient, ref: ReferenceData):
     introducer_companies = _resolve_companies_for_contacts(client, introducer_ids)
     for c in contacts:
         c["program"] = programs.get(c["id"])
-        company = introducer_companies.get(c.pop("_introducer_id"))
-        c["introducer_company"] = company["name"] if company else None
+        c["introducer_company"] = introducer_companies.get(c.pop("_introducer_id"))
 
     return property_name, counts, contacts
 
@@ -1029,7 +1046,7 @@ def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_sourc
     for contact_id, deal_id in qualifying_deal_by_contact.items():
         if contact_id not in introducers:
             continue
-        _, owner_id = introducers[contact_id]
+        introducer_id, owner_id = introducers[contact_id]
         deal_properties = deal_by_id.get(deal_id, {})
         signed_date = deal_properties.get(ref.proposal_signed_property)
         if not signed_date:
@@ -1054,6 +1071,7 @@ def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_sourc
             "owner": owner_id,
             "program": program,
             "day": day.isoformat(),
+            "_introducer_id": introducer_id,
         })
 
     if missing_signed_date:
@@ -1065,6 +1083,11 @@ def fetch_retained_clients(client: HubSpotClient, ref: ReferenceData, lead_sourc
     if prior_year:
         print(f"  {len(prior_year)} qualifying deal(s) signed before this calendar year "
               f"(excluded from year-to-date): {prior_year[:10]}")
+
+    introducer_ids = list({d["_introducer_id"] for d in deals})
+    introducer_companies = _resolve_companies_for_contacts(client, introducer_ids)
+    for d in deals:
+        d["introducer_company"] = introducer_companies.get(d.pop("_introducer_id"))
 
     total = sum(counts.values())
     print(f"Retained Clients: {total} (year-to-date; all-time accepted ground truth was 6)")

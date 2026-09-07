@@ -90,23 +90,47 @@ a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible{
   display:flex;align-items:center;justify-content:center;padding:24px}
 .modal-backdrop[hidden]{display:none}
 .modal{background:var(--surface);border-radius:var(--radius-lg);box-shadow:var(--shadow-md);
-  max-width:560px;width:100%;max-height:92vh;overflow:auto;padding:24px}
+  max-width:min(700px,92vw);width:100%;max-height:92vh;overflow:auto;padding:24px;overscroll-behavior:contain}
+.modal-sm{max-width:280px}
 .modal h3{font-size:1.0625rem;margin-bottom:4px}
 .modal .text-caption{margin-bottom:16px}
 .modal-list{list-style:none;display:flex;flex-direction:column;gap:2px}
-.modal-list a{display:block;padding:10px 12px;border-radius:var(--radius-md);
-  color:var(--primary);font-size:.875rem;font-weight:500;border:1px solid var(--border)}
-.modal-list a:hover{background:var(--muted-surface);text-decoration:none}
+/* The week-picker's options - full-width blocks, one per line. Deliberately
+   scoped to just `.week-option` rather than a generic `.modal-list a` (which
+   used to also match the inline links inside `.modal-row` - Retained/
+   Referred/company-contact - forcing them block/100%-wide and breaking the
+   one-line-per-record layout, since `.modal-row a` below never resets
+   display/width itself). Every record-list modal now renders via
+   `.modal-row`, so no plain `<a>` needs this block style any more. */
+.modal-list button.week-option{display:block;width:100%;text-align:left;padding:10px 12px;
+  border-radius:var(--radius-md);color:var(--primary);font-size:.875rem;font-weight:500;
+  border:1px solid var(--border);font-family:inherit}
+.modal-list button.week-option:hover{background:var(--muted-surface);text-decoration:none}
 .modal-close{margin-top:18px;padding:8px 16px;border:1px solid var(--border-strong);
   border-radius:var(--radius-md);font-size:.8125rem;font-weight:600;color:var(--primary)}
 .modal-close:hover{background:var(--muted-surface)}
-.modal-row{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;padding:10px 12px;
-  border-radius:var(--radius-md);border:1px solid var(--border);font-size:.875rem}
+/* One record, one literal line - never wraps, no matter how long a field
+   is (e.g. a long country/program value). A row that's still too wide for
+   the modal scrolls horizontally within itself instead, so nothing is ever
+   hidden or truncated. */
+.modal-row{display:flex;flex-wrap:nowrap;align-items:center;gap:4px 10px;padding:10px 12px;
+  border-radius:var(--radius-md);border:1px solid var(--border);font-size:.875rem;
+  overflow-x:auto;overscroll-behavior:contain}
+.modal-row>*{white-space:nowrap;flex:none}
 .modal-row a{color:var(--primary);font-weight:500;padding:2px 4px;margin:-2px -4px;border-radius:3px}
 .modal-row a:hover{background:var(--muted-surface);text-decoration:underline}
 .modal-row-sep{color:var(--border-strong)}
-.modal-row-meta{width:100%;font-size:.75rem;color:var(--muted);font-weight:400}
 .modal-item-missing{color:var(--muted);font-style:italic}
+
+/* ── period + week-picker "+" button ─────────────────── */
+.period-with-week{display:inline-flex;align-items:center;gap:6px}
+.week-picker-btn{font:inherit;font-weight:600;font-size:.8125rem;color:var(--muted);
+  background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-md);
+  width:30px;height:30px;flex:none;display:inline-flex;align-items:center;justify-content:center;
+  touch-action:manipulation}
+.week-picker-btn:hover{background:var(--muted-surface);color:var(--primary)}
+.week-picker-btn[aria-pressed="true"]{background:var(--secondary);border-color:var(--secondary);color:#fff}
+.week-picker-btn[hidden]{display:none}
 
 /* ── numeric cells that open a HubSpot record (Retained/Referred only) ─ */
 .num-link{font:inherit;color:inherit;padding:2px 6px;margin:-2px -6px;border-radius:3px}

@@ -17,6 +17,68 @@ const CURRENT_MONTH = +THROUGH.slice(5, 7);
 const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+/* ────────── date helpers ────────── */
+const fmt = n => (n == null ? '—' : n.toLocaleString('en-US'));
+const pct = (n, d) => (d ? Math.round((100 * n) / d) : 0);
+const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+/* "2026-09-07" -> "7 Sep 2026" - used by every stage's click-through modal. */
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const [y, m, d] = iso.split('-').map(Number);
+  return `${d} ${MONTH_NAMES[m - 1]} ${y}`;
+}
+/* Standard ISO-8601 week number (Thursday-of-the-week trick) - mirrors what
+   Python's date.isocalendar()[1] does server-side (see generate_report.py's
+   build_calendar_hierarchy); reimplemented here since the two runtimes don't
+   share code. Used only by the week-picker below. */
+function isoWeekNumber(d) {
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const dayNum = (date.getUTCDay() + 6) % 7; // Mon=0..Sun=6
+  date.setUTCDate(date.getUTCDate() - dayNum + 3); // nearest Thursday
+  const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  const firstDayNum = (firstThursday.getUTCDay() + 6) % 7;
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDayNum + 3);
+  return 1 + Math.round((date - firstThursday) / (7 * 86400000));
+}
+function isoDateUTC(d) { return d.toISOString().slice(0, 10); }
+/* Splits one calendar month into weeks, clipped at the month boundary (a
+   global ISO week spanning two months is cut into two partial groups) -
+   same grouping build_calendar_hierarchy() does in generate_report.py,
+   ported to JS. With clipToToday=true (used for the current month), stops at
+   THROUGH instead of the real end of month, so the picker never offers a
+   week that hasn't happened yet. With clipToToday=false, always the full
+   month - used for the fixed weekly-target subdivision, which shouldn't
+   shrink just because the month is in progress. */
+function computeWeeksOfMonth(year, month, clipToToday) {
+  const firstOfMonth = new Date(Date.UTC(year, month - 1, 1));
+  const lastOfMonth = new Date(Date.UTC(year, month, 0));
+  const isCurrentMonth = month === CURRENT_MONTH && year === YEAR;
+  const throughDate = new Date(THROUGH + 'T00:00:00Z');
+  const lastDay = (clipToToday && isCurrentMonth && throughDate < lastOfMonth) ? throughDate : lastOfMonth;
+  const weeks = [];
+  let cur = new Date(firstOfMonth);
+  let curIsoWeek = null, weekStart = null, weekEnd = null;
+  while (cur <= lastDay) {
+    const wk = isoWeekNumber(cur);
+    if (wk !== curIsoWeek) {
+      if (weekStart) weeks.push({ start: weekStart, end: weekEnd });
+      curIsoWeek = wk;
+      weekStart = new Date(cur);
+    }
+    weekEnd = new Date(cur);
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  if (weekStart) weeks.push({ start: weekStart, end: weekEnd });
+  return weeks.map((w, i) => ({ label: `W${i + 1}`, start: isoDateUTC(w.start), end: isoDateUTC(w.end) }));
+}
+/* Fixed number of weeks the whole month splits into, regardless of how much
+   of it has elapsed - the denominator for the weekly target (month target /
+   this), per João's spec: a fixed pacing subdivision, not shrunk for an
+   in-progress month. */
+function numberOfWeeksInMonth(year, month) {
+  return computeWeeksOfMonth(year, month, false).length;
+}
+
 /* ────────── state ────────── */
 function initialPeriodFromUrl() {
   const p = new URLSearchParams(window.location.search).get('period');
@@ -28,7 +90,17 @@ function initialDirectorFromUrl() {
   const d = new URLSearchParams(window.location.search).get('director');
   return d && OWNER_ORDER.includes(d) ? d : null; // null = All Directors
 }
+/* Only meaningful when period is a month - a week label must resolve to a
+   real week of that month (elapsed-only), or it's dropped. */
+function initialWeekFromUrl(period) {
+  if (period === 'ytd') return null;
+  const w = new URLSearchParams(window.location.search).get('week');
+  if (!w) return null;
+  const weeks = computeWeeksOfMonth(YEAR, +period.slice(2), true);
+  return weeks.find(wk => wk.label === w) || null;
+}
 const S = { period: initialPeriodFromUrl(), director: initialDirectorFromUrl() };
+S.week = initialWeekFromUrl(S.period);
 let lastFocusedEl = null;
 /* The Director(s) currently in scope - just the selected one when the
    Director filter is active, both (in display order) when it's "All". */
@@ -37,9 +109,6 @@ function activeOwners() {
 }
 
 /* ────────── data access ────────── */
-const fmt = n => (n == null ? '—' : n.toLocaleString('en-US'));
-const pct = (n, d) => (d ? Math.round((100 * n) / d) : 0);
-const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function monthPrefix(m) { return `${YEAR}-${String(m).padStart(2, '0')}-`; }
 function periodMatch(day) {
   return S.period === 'ytd' ? true : day.startsWith(monthPrefix(+S.period.slice(2)));
@@ -69,11 +138,26 @@ function stageMonthTotal(stageKey, month, ownerId) {
   }
   return t;
 }
+/* Sum a stage's daily counts within one week (inclusive start/end), for one
+   owner or the active Director(s) - the "This week" sub-line's numerator
+   once a week is picked. */
+function stageWeekTotal(stageKey, week, ownerId) {
+  const daily = D.stages[stageKey].daily;
+  const ids = ownerId ? [ownerId] : activeOwners();
+  let t = 0;
+  for (const id of ids) {
+    const days = daily[id] || {};
+    for (const [day, v] of Object.entries(days)) if (day >= week.start && day <= week.end) t += v;
+  }
+  return t;
+}
 /* Sum a stage's daily counts from Jan 1 through the end of the selected
    period (today, if YTD; the last day of the selected month, otherwise) -
    the cumulative-progress-to-date basis for the Target columns and the
    table's Total column. Distinct from stageSum(), which for a selected
-   month returns only that single month's isolated count. */
+   month returns only that single month's isolated count. Unaffected by a
+   week selection - "Target to date" always tracks the full period, per
+   João's "target to date column continues" instruction. */
 function cumulativeThroughPeriod(stageKey, ownerId) {
   if (S.period === 'ytd') return stageSum(stageKey, ownerId);
   const month = +S.period.slice(2);
@@ -126,89 +210,173 @@ function onNumLinkClick(btn) {
   const parts = [D.stages[stageKey].label];
   if (owner) parts.push(OWNER_NAME[owner]);
   const title = parts.join(' · ');
-  if (kind === 'deal') { openRecordModal(records, D.meta.deal_url_base, title); return; }
+  if (kind === 'deal') { openRecordModal(records, title); return; }
   if (kind === 'contact') { openReferredModal(records, title); return; }
   if (kind === 'companyContact') { openCompanyContactModal(records, title); return; }
 }
-/* Shared modal-open plumbing (show, set focus, attach the focus-trap/
-   Escape listener) - used by every record-list modal (openRecordModal,
-   openReferredModal, openCompanyContactModal), which differ only in the
-   list markup they build. */
-function showModal(title, subtitle, listHtml) {
-  document.getElementById('dealModalTitle').textContent = title;
-  document.getElementById('dealModalSub').textContent = subtitle;
-  document.getElementById('dealModalList').innerHTML = listHtml;
+/* One line per record, every field inline and joined by the same
+   modal-row-sep divider - used by all three modal-builders below so the 5
+   stages render structurally the same way, not just by convention. Each
+   segment is either {type:'link', href, label} (a real HubSpot record) or
+   {type:'text', label, missing?} (plain descriptive text - `missing: true`
+   renders it as the existing "No X on record" fallback style). */
+function renderModalRow(segments) {
+  const parts = segments.map((seg, i) => {
+    const html = seg.type === 'link'
+      ? `<a href="${seg.href}" target="_blank" rel="noopener">${escapeHtml(seg.label)}</a>`
+      : `<span${seg.missing ? ' class="modal-item-missing"' : ''}>${escapeHtml(seg.label)}</span>`;
+    return i === 0 ? html : `<span class="modal-row-sep" aria-hidden="true">·</span>${html}`;
+  });
+  return `<li class="modal-row">${parts.join('')}</li>`;
+}
+function companyOrMissing(company) {
+  return company
+    ? { type: 'link', href: `${D.meta.company_url_base}${company.id}`, label: company.name }
+    : { type: 'text', label: 'No company on record', missing: true };
+}
+/* Retained/Referred's introducer-company segment specifically - same link,
+   with "Referred by" spelled out ahead of the name so the row reads as a
+   sentence rather than a bare company name. */
+function referredBySegment(company) {
+  return company
+    ? { type: 'link', href: `${D.meta.company_url_base}${company.id}`, label: `Referred by ${company.name}` }
+    : { type: 'text', label: 'Referred by — no company on record', missing: true };
+}
+/* Shared modal/dialog plumbing (show, focus, focus-trap/Escape, restore
+   focus on close) - used by both the record-list modal (#dealModal) and the
+   compact week-picker dialog (#weekModal), which differ only in the content
+   each builds. Only one is ever open at a time. */
+let activeDialog = null; // { backdropId, containerId }
+function openDialogBase(backdropId, containerId, focusElId) {
   lastFocusedEl = document.activeElement;
-  document.getElementById('dealModalBackdrop').hidden = false;
-  // Focus the title, not the Close button at the bottom of the list -
-  // Close is the last element in the scrollable .modal container, and
-  // focusing it scrolls the container to the bottom by default. The
-  // title is also the conventional initial-focus target for a dialog
-  // with no more specific default action, and reads its name first.
-  document.getElementById('dealModalTitle').focus();
-  document.addEventListener('keydown', onModalKeydown);
+  document.getElementById(backdropId).hidden = false;
+  activeDialog = { backdropId, containerId };
+  // Focus the title, not a button at the bottom of a scrollable container -
+  // that would scroll it to the bottom by default. The title is also the
+  // conventional initial-focus target for a dialog with no more specific
+  // default action, and reads its name first.
+  document.getElementById(focusElId).focus();
+  document.addEventListener('keydown', onDialogKeydown);
 }
-function openRecordModal(records, urlBase, title) {
-  const itemHtml = r => `<li><a href="${urlBase}${r.id}" target="_blank" rel="noopener">${escapeHtml(r.name)}${r.program ? ' · ' + escapeHtml(r.program) : ''}</a></li>`;
-  const subtitle = `${records.length} record${records.length === 1 ? '' : 's'} - click one to open it in HubSpot`;
-  showModal(title, subtitle, records.map(itemHtml).join(''));
-}
-/* Referred Clients modal - the client's own name stays the sole link (the
-   HubSpot record actually being counted); program of interest and the
-   introducer's company render as plain descriptive text underneath, since
-   neither is itself a navigable HubSpot record here (introducer_company
-   carries no id in the data). */
-function openReferredModal(records, title) {
-  const itemHtml = r => {
-    const meta = [r.program, r.introducer_company].filter(Boolean).map(escapeHtml).join(' · ');
-    return `<li class="modal-row">
-      <a href="${D.meta.contact_url_base}${r.id}" target="_blank" rel="noopener">${escapeHtml(r.name)}</a>
-      ${meta ? `<span class="modal-row-meta">${meta}</span>` : ''}
-    </li>`;
-  };
-  const subtitle = `${records.length} record${records.length === 1 ? '' : 's'} - click a name to open the contact in HubSpot`;
-  showModal(title, subtitle, records.map(itemHtml).join(''));
-}
-/* Presentations / Calls-Meetings / New Intermediaries modal - each row
-   hyperlinks the company name and the contact name (first + last)
-   separately, straight to their own HubSpot records. A record with no
-   resolved company (not every meeting/deal has one) shows plain text
-   instead of a dead link. */
-function openCompanyContactModal(records, title) {
-  const itemHtml = r => {
-    const companyHtml = r.company
-      ? `<a href="${D.meta.company_url_base}${r.company.id}" target="_blank" rel="noopener">${escapeHtml(r.company.name)}</a>`
-      : `<span class="modal-item-missing">No company on record</span>`;
-    const contactHtml = r.contact
-      ? `<a href="${D.meta.contact_url_base}${r.contact.id}" target="_blank" rel="noopener">${escapeHtml(r.contact.name)}</a>`
-      : `<span class="modal-item-missing">No contact on record</span>`;
-    return `<li class="modal-row">${companyHtml}<span class="modal-row-sep" aria-hidden="true">·</span>${contactHtml}</li>`;
-  };
-  const subtitle = `${records.length} record${records.length === 1 ? '' : 's'} - click a company or contact to open it in HubSpot`;
-  showModal(title, subtitle, records.map(itemHtml).join(''));
-}
-function closeRecordModal() {
-  document.getElementById('dealModalBackdrop').hidden = true;
-  document.removeEventListener('keydown', onModalKeydown);
+function closeDialog() {
+  if (!activeDialog) return;
+  document.getElementById(activeDialog.backdropId).hidden = true;
+  document.removeEventListener('keydown', onDialogKeydown);
+  activeDialog = null;
   if (lastFocusedEl) lastFocusedEl.focus();
 }
-function onModalKeydown(e) {
-  if (e.key === 'Escape') { closeRecordModal(); return; }
+function onDialogKeydown(e) {
+  if (!activeDialog) return;
+  if (e.key === 'Escape') { closeDialog(); return; }
   if (e.key !== 'Tab') return;
-  // Basic focus trap: wrap Tab/Shift+Tab within the modal's own
-  // focusable elements (the link list + Close - recomputed every time,
-  // since the list changes on each open).
-  const focusable = Array.from(document.querySelectorAll('#dealModal a, #dealModal button'));
+  // Basic focus trap: wrap Tab/Shift+Tab within the open dialog's own
+  // focusable elements - recomputed every time, since the content changes
+  // on each open.
+  const focusable = Array.from(document.querySelectorAll(`#${activeDialog.containerId} a, #${activeDialog.containerId} button`));
   if (!focusable.length) return;
   const first = focusable[0], last = focusable[focusable.length - 1];
   if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
   else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
 }
+function showModal(title, subtitle, listHtml) {
+  document.getElementById('dealModalTitle').textContent = title;
+  document.getElementById('dealModalSub').textContent = subtitle;
+  document.getElementById('dealModalList').innerHTML = listHtml;
+  openDialogBase('dealModalBackdrop', 'dealModal', 'dealModalTitle');
+}
+/* Retained Clients modal - one line per deal: country/program of interest
+   (the click target, linking to the deal - the deal's own name is dropped
+   from the visible line per the 2026-09-07 review), the introducer's
+   company (also a link, when resolved), and the proposal-signed date. */
+function openRecordModal(records, title) {
+  const itemHtml = r => renderModalRow([
+    { type: 'link', href: `${D.meta.deal_url_base}${r.id}`, label: r.program || 'Program not specified' },
+    referredBySegment(r.introducer_company),
+    { type: 'text', label: `Signed ${fmtDate(r.day)}` },
+  ]);
+  const subtitle = `${records.length} record${records.length === 1 ? '' : 's'} - click to open in HubSpot`;
+  showModal(title, subtitle, records.map(itemHtml).join(''));
+}
+/* Referred Clients modal - same treatment as Retained: one line per contact,
+   country/program of interest is the click target (linking to the contact -
+   the contact's own name is dropped from the visible line, same as
+   Retained's deal name), the introducer's company (link), and the date the
+   contact was created. */
+function openReferredModal(records, title) {
+  const itemHtml = r => renderModalRow([
+    { type: 'link', href: `${D.meta.contact_url_base}${r.id}`, label: r.program || 'Program not specified' },
+    referredBySegment(r.introducer_company),
+    { type: 'text', label: fmtDate(r.day) },
+  ]);
+  const subtitle = `${records.length} record${records.length === 1 ? '' : 's'} - click to open in HubSpot`;
+  showModal(title, subtitle, records.map(itemHtml).join(''));
+}
+/* Presentations / Calls-Meetings / New Intermediaries modal - one line per
+   record: company, contact, and the day of the deal/meeting. */
+function openCompanyContactModal(records, title) {
+  const itemHtml = r => renderModalRow([
+    companyOrMissing(r.company),
+    r.contact
+      ? { type: 'link', href: `${D.meta.contact_url_base}${r.contact.id}`, label: r.contact.name }
+      : { type: 'text', label: 'No contact on record', missing: true },
+    { type: 'text', label: fmtDate(r.day) },
+  ]);
+  const subtitle = `${records.length} record${records.length === 1 ? '' : 's'} - click a company or contact to open it in HubSpot`;
+  showModal(title, subtitle, records.map(itemHtml).join(''));
+}
 function initModal() {
-  document.getElementById('dealModalClose').addEventListener('click', closeRecordModal);
+  document.getElementById('dealModalClose').addEventListener('click', closeDialog);
   document.getElementById('dealModalBackdrop').addEventListener('click', e => {
-    if (e.target.id === 'dealModalBackdrop') closeRecordModal();
+    if (e.target.id === 'dealModalBackdrop') closeDialog();
   });
+}
+
+/* ────────── week picker ────────── */
+function openWeekDialog(month) {
+  const monthName = MONTH_NAMES[month - 1];
+  const weeks = computeWeeksOfMonth(YEAR, month, true);
+  document.getElementById('weekModalTitle').textContent = `Choose a week in ${monthName}`;
+  document.getElementById('weekModalSub').textContent = 'This narrows the "This week" figure only - Quantity and Target to date are unaffected.';
+  const optionHtml = (label, text) => `<li><button type="button" class="week-option" data-week="${label || ''}">${escapeHtml(text)}</button></li>`;
+  const listHtml = [optionHtml('', 'Full month')].concat(
+    weeks.map(w => optionHtml(w.label, `${w.label} · ${fmtDate(w.start)} – ${fmtDate(w.end)}`))
+  ).join('');
+  const listEl = document.getElementById('weekModalList');
+  listEl.innerHTML = listHtml;
+  listEl.querySelectorAll('.week-option').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const label = btn.dataset.week;
+      S.week = label ? weeks.find(w => w.label === label) : null;
+      closeDialog();
+      syncUrl();
+      render();
+    });
+  });
+  openDialogBase('weekModalBackdrop', 'weekModal', 'weekModalTitle');
+}
+function initWeekDialog() {
+  document.getElementById('weekModalClose').addEventListener('click', closeDialog);
+  document.getElementById('weekModalBackdrop').addEventListener('click', e => {
+    if (e.target.id === 'weekModalBackdrop') closeDialog();
+  });
+  document.getElementById('weekPickerBtn').addEventListener('click', () => {
+    if (S.period === 'ytd') return;
+    openWeekDialog(+S.period.slice(2));
+  });
+}
+/* Shows/hides the "+" button and keeps its label/aria-state in sync - only
+   visible when a specific month (not YTD) is selected. */
+function updateWeekPickerButton() {
+  const btn = document.getElementById('weekPickerBtn');
+  const isMonth = S.period !== 'ytd';
+  btn.hidden = !isMonth;
+  if (!isMonth) return;
+  const monthName = MONTH_NAMES[+S.period.slice(2) - 1];
+  btn.textContent = S.week ? S.week.label : '+';
+  btn.setAttribute('aria-pressed', S.week ? 'true' : 'false');
+  btn.setAttribute('aria-label', S.week
+    ? `Week ${S.week.label} of ${monthName} selected - change week`
+    : `Choose a week in ${monthName}`);
 }
 
 /* ────────── period / director controls ────────── */
@@ -217,6 +385,8 @@ function syncUrl() {
   url.searchParams.set('period', S.period);
   if (S.director) url.searchParams.set('director', S.director);
   else url.searchParams.delete('director');
+  if (S.week) url.searchParams.set('week', S.week.label);
+  else url.searchParams.delete('week');
   history.replaceState(null, '', url);
 }
 function buildPeriodSelect() {
@@ -229,6 +399,7 @@ function buildPeriodSelect() {
     sel.value = S.period;
     sel.addEventListener('change', () => {
       S.period = sel.value;
+      S.week = null; // a new period always clears the week drill-down
       sels.forEach(other => { if (other !== sel) other.value = S.period; });
       syncUrl();
       render();
@@ -254,15 +425,22 @@ function buildDirectorSelect() {
    Paired with the existing cumulative-to-date numerator
    (cumulativeThroughPeriod()), so the percentage reflects progress made so
    far against the full year's goal, not a shrunk goal for the elapsed
-   months. */
+   months. Unaffected by a week selection. */
 function targetToDate(stageKey, ownerId) {
   return D.targets[stageKey].per_bdm_annual * (ownerId ? 1 : activeOwners().length);
 }
 /* "This month" secondary line's denominator - one twelfth of the annual
    target, scaled the same way as targetToDate(). Only shown when a single
-   month (not YTD) is selected. */
+   month (not YTD) is selected; also the basis for the weekly target below. */
 function monthlyTarget(stageKey, ownerId) {
   return Math.round(D.targets[stageKey].per_bdm_annual * (ownerId ? 1 : activeOwners().length) / 12);
+}
+/* "This week" secondary line's denominator, once a week is picked - the
+   monthly target divided by how many weeks the whole month splits into
+   (fixed, not just the elapsed ones). E.g. a 12/month target over a 4-week
+   month paces at 3/week. */
+function weeklyTarget(stageKey, ownerId, month) {
+  return Math.round(monthlyTarget(stageKey, ownerId) / numberOfWeeksInMonth(YEAR, month));
 }
 /* Rank the active Director(s) by a stage's quantity for the selected
    period, higher first; ties keep OWNER_ORDER's existing order (João
@@ -280,6 +458,12 @@ function renderStageBox(key) {
   const month = isMonth ? +S.period.slice(2) : null;
   const showRank = !S.director; // ranking a list of one Director is noise
   const showTotal = !S.director; // would duplicate the single row's own numbers
+  // Retained's annual target (12/BDM) is too small to survive a weekly split
+  // without rounding to 0 (12/year over ~4-5 weeks/month rounds to 0/week) -
+  // "0/0" is meaningless, so the column is dropped entirely for this stage
+  // once a week is selected, rather than showing a broken target. The
+  // "This month" line (rounds to ~1/month) stays meaningful and unaffected.
+  const showWeekColumn = isMonth && !(key === 'retained_clients' && S.week);
   const headingId = `stageBoxHeading-${key}`;
   const bodyRow = (ownerId, rank) => {
     const qty = stageSum(key, ownerId);
@@ -290,10 +474,17 @@ function renderStageBox(key) {
       ? `${showRank ? `<span class="rank-badge">${rank}</span>` : ''}${escapeHtml(OWNER_NAME[ownerId])}`
       : '<b>Total</b>';
     let monthCell = '';
-    if (isMonth) {
-      const monthQty = stageMonthTotal(key, month, ownerId);
-      const mTarget = monthlyTarget(key, ownerId);
-      const cell = `This month: ${fmt(monthQty)}/${mTarget} (${pct(monthQty, mTarget)}%)`;
+    if (showWeekColumn) {
+      let cell;
+      if (S.week) {
+        const weekQty = stageWeekTotal(key, S.week, ownerId);
+        const wTarget = weeklyTarget(key, ownerId, month);
+        cell = `This week (${S.week.label}): ${fmt(weekQty)}/${wTarget} (${pct(weekQty, wTarget)}%)`;
+      } else {
+        const monthQty = stageMonthTotal(key, month, ownerId);
+        const mTarget = monthlyTarget(key, ownerId);
+        cell = `This month: ${fmt(monthQty)}/${mTarget} (${pct(monthQty, mTarget)}%)`;
+      }
       monthCell = `<td><div class="kpi-sub">${cell}</div></td>`;
     }
     return `<tr>
@@ -316,7 +507,7 @@ function renderStageBox(key) {
         <th scope="col" style="text-align:left">Director</th>
         <th scope="col">Quantity</th>
         <th scope="col">Target to date</th>
-        ${isMonth ? '<th scope="col">This month</th>' : ''}
+        ${showWeekColumn ? `<th scope="col">${S.week ? 'This week' : 'This month'}</th>` : ''}
       </tr></thead>
       <tbody>${ranked.map((id, i) => bodyRow(id, i + 1)).join('')}</tbody>
       <tfoot>${showTotal ? bodyRow(null, null) : ''}</tfoot>
@@ -344,11 +535,13 @@ function renderChrome() {
 function render() {
   renderChrome();
   renderStageBoxes();
+  updateWeekPickerButton();
 }
 
 buildPeriodSelect();
 buildDirectorSelect();
 initModal();
+initWeekDialog();
 syncUrl();
 render();
 </script>
