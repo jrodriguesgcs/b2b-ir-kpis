@@ -174,18 +174,25 @@ function cumulativeThroughPeriod(stageKey, ownerId) {
 
 /* ────────── click-through-to-HubSpot (Retained -> deal, Referred -> contact,
    Presentations/Calls/Meetings/New Intermediaries -> company + contact) ─── */
+/* Newest-first: every occurrence modal (Retained, Referred,
+   Presentations/Calls-Meetings/New Intermediaries) shows the most recent
+   record first. `day` is always a plain ISO YYYY-MM-DD string, so
+   lexicographic order is chronological order. */
+function byDayDesc(a, b) {
+  return a.day < b.day ? 1 : a.day > b.day ? -1 : 0;
+}
 function recordsFor(stageKey, ownerId, program) {
   if (stageKey === 'retained_clients') {
     const deals = D.stages.retained_clients.deals || [];
-    return { kind: 'deal', records: deals.filter(d => periodMatch(d.day) && (!ownerId || d.owner === ownerId) && (!program || d.program === program)) };
+    return { kind: 'deal', records: deals.filter(d => periodMatch(d.day) && (!ownerId || d.owner === ownerId) && (!program || d.program === program)).sort(byDayDesc) };
   }
   if (stageKey === 'referred_clients') {
     const contacts = D.stages.referred_clients.contacts || [];
-    return { kind: 'contact', records: contacts.filter(c => periodMatch(c.day) && (!ownerId || c.owner === ownerId)) };
+    return { kind: 'contact', records: contacts.filter(c => periodMatch(c.day) && (!ownerId || c.owner === ownerId)).sort(byDayDesc) };
   }
   if (stageKey === 'presentations' || stageKey === 'calls_meetings' || stageKey === 'new_intermediaries') {
     const records = D.stages[stageKey].records || [];
-    return { kind: 'companyContact', records: records.filter(r => periodMatch(r.day) && (!ownerId || r.owner === ownerId)) };
+    return { kind: 'companyContact', records: records.filter(r => periodMatch(r.day) && (!ownerId || r.owner === ownerId)).sort(byDayDesc) };
   }
   return { kind: null, records: [] };
 }
